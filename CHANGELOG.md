@@ -17,6 +17,11 @@ Token Watch reaches the VS Code extension: `/context-bar` answers as text where 
 - The band's formatting (window names and order, countdowns, token counts, level colours) moved to `hooks/format.ts`, shared by the band, the text reply and the snapshot.
 - Readings are taken after each turn even while the band is hidden, so the snapshot stays current.
 - The README's privacy section now lists the one file the mod writes and the two environment variables it reads.
+- Terminal bars are drawn with `▄` (lower half block) instead of `▆`: every console font has it, so the classic Windows console no longer shows boxes, and at half a line it sits closer to the desktop app's 60% bars.
+
+### Fixed
+
+- In a narrow terminal the collapsed line could shorten `CTX` to `C…`; the label and the percentage now keep their width and the bar gives way.
 
 ## 1.0.0 (2026-10-09)
 

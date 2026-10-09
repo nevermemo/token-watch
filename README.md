@@ -8,17 +8,17 @@ Expanded:
 
 ```text
 ╭──────────────────────────────────────────────────────────────────╮
-│ 5H   ▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆  62%  2h 14m   │
-│ WK   ▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆  31%  3d 4h    │
-│ CTX  ▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆  21%  212k / 1M│
-│      ▆ messages 186k   ▆ tools 12k   ▆ memory 4.9k   ▆ skills 3k │
+│ 5H   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄  62%  2h 14m   │
+│ WK   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄  31%  3d 4h    │
+│ CTX  ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄  21%  212k / 1M│
+│      ▄ messages 186k   ▄ tools 12k   ▄ memory 4.9k   ▄ skills 3k │
 ╰──────────────────────────────────────────────────────────────────╯
 ```
 
 Collapsed:
 
 ```text
- 5H ▆▆▆▆▆▆▆▆▆▆ 62%   WK ▆▆▆▆▆▆▆▆▆▆ 31%   CTX ▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆ 21%  212k / 1M
+ 5H ▄▄▄▄▄▄▄▄▄▄ 62%   WK ▄▄▄▄▄▄▄▄▄▄ 31%   CTX ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄ 21%  212k / 1M
 ```
 
 In the real band each bar is filled in proportion and coloured: a coloured fill on a grey track for usage, and one colour per category for the context.
@@ -196,7 +196,7 @@ The snapshot file is described [above](#the-usage-snapshot).
 | `ui.render` (`AbovePrompt`) | Draws the band as a client module ([`hooks/band.tsx`](hooks/band.tsx)). The band lays itself out to the available width and reports clicks. Other mods drawing above the prompt keep their place; Token Watch adds its band beneath theirs. |
 | `ui.message` | Receives the click and flips between expanded and collapsed. |
 
-**Bars on each surface:** on the desktop app, bars are boxes 60% of the line's height. In a terminal they are `▆` blocks. Both are thinner than the line, so stacked bars keep a gap between them.
+**Bars on each surface:** on the desktop app, bars are boxes 60% of the line's height. In a terminal they are `▄` blocks. Both are thinner than the line, so stacked bars keep a gap between them.
 
 ## Development
 

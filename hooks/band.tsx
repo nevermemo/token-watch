@@ -46,9 +46,10 @@ type Row = { label: string; bar: unknown[]; percent: number; detail: string }
 const TRACK = '#3d4250'
 const RESERVE = '#2e3139'
 
-// What a terminal draws a piece with: a lower block, the one glyph that is
-// shorter than its cell.
-const GLYPH = '▆'
+// What a terminal draws a piece with: the lower half block, shorter than its
+// cell, and one every console font has (the finer ▆ is missing from Consolas
+// and Lucida Console, so the classic Windows console drew boxes).
+const GLYPH = '▄'
 
 // The legend's shorter names for the longer category labels.
 const LEGEND: Record<string, string> = {
@@ -114,13 +115,18 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
           </Box>
         ))}
         <Box flexDirection="row" alignItems="center" columnGap={1} flexGrow={1}>
-          <Text dimColor={!isHovered} wrap="truncate">
-            CTX
-          </Text>
+          {/* The label and percentage keep their width; the bar gives way. */}
+          <Box flexShrink={0}>
+            <Text dimColor={!isHovered} wrap="truncate">
+              CTX
+            </Text>
+          </Box>
           <Box flexDirection="row" flexGrow={1} minWidth={4} height={1} alignItems="center">
             {bar(draw, now, TRACK, RESERVE)}
           </Box>
-          <Text wrap="truncate" {...warning(percent)}>{`${percent}%`}</Text>
+          <Box flexShrink={0}>
+            <Text wrap="truncate" {...warning(percent)}>{`${percent}%`}</Text>
+          </Box>
           {showDetail && (
             <Box marginLeft={1} flexShrink={0}>
               <Text dimColor wrap="truncate">

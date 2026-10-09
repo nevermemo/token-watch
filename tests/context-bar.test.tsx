@@ -154,7 +154,7 @@ describe('context bar', () => {
       if (surface === 'desktop') {
         // Gapless 60%-height boxes; no glyph runs.
         expect(expanded).toContain('"height":"60%"')
-        expect(expanded).not.toContain('▆')
+        expect(expanded).not.toContain('▄')
         // Track: the two usage meters and the context's free space; the
         // reserve past the auto-compact point is its own darker shade.
         expect(count(expanded, '"backgroundColor":"#3d4250"')).toBe(3)
@@ -163,7 +163,7 @@ describe('context bar', () => {
         expect(count(expanded, '"backgroundColor":"#d97757"')).toBe(2)
       } else {
         // Clipped runs of lower blocks; no box background and no 60% box.
-        expect(expanded).toContain('▆')
+        expect(expanded).toContain('▄')
         expect(expanded).not.toMatch(/"type":"Box","props":{[^}]*"backgroundColor"/)
         expect(expanded).not.toContain('"height":"60%"')
         expect(count(expanded, '"color":"#3d4250","wrap":"wrap"')).toBe(3)
@@ -230,12 +230,12 @@ describe('context bar', () => {
       expect(collapsed).not.toMatch(/"height":1,"backgroundColor"/)
       if (surface === 'desktop') {
         expect(collapsed).toContain('"height":"60%"')
-        expect(collapsed).not.toContain('▆')
+        expect(collapsed).not.toContain('▄')
         expect(count(collapsed, '"backgroundColor":"#3d4250"')).toBe(3)
         expect(count(collapsed, '"backgroundColor":"#2e3139"')).toBe(1)
         expect(count(collapsed, '"backgroundColor":"#d97757"')).toBe(1)
       } else {
-        expect(collapsed).toContain('▆')
+        expect(collapsed).toContain('▄')
         expect(collapsed).not.toMatch(/"type":"Box","props":{[^}]*"backgroundColor"/)
         expect(count(collapsed, '"color":"#3d4250","wrap":"wrap"')).toBe(3)
         expect(count(collapsed, '"color":"#2e3139","wrap":"wrap"')).toBe(1)
