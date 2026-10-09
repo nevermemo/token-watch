@@ -98,7 +98,7 @@ To list Token Watch in a marketplace you already run, add an entry to its `plugi
 }
 ```
 
-To pin a release, add `"ref": "v1.0.0"` to the `source` object. Administrators can also require the marketplace or the plugin on every machine through managed settings. See [Manage mods for your organization](https://code.claude.com/docs/en/plugins/mods/admin).
+To pin a release, add `"ref": "v1.1.0"` to the `source` object. Administrators can also require the marketplace or the plugin on every machine through managed settings. See [Manage mods for your organization](https://code.claude.com/docs/en/plugins/mods/admin).
 
 ### Uninstall
 
