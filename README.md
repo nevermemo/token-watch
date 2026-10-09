@@ -2,7 +2,7 @@
 
 **See your Claude Code plan usage and context window at a glance, right above the prompt.**
 
-Token Watch is a Claude Code [mod](https://code.claude.com/docs/en/plugins/mods/overview). It draws a small band above the prompt with your plan usage and your context window. The 5-hour and weekly windows each get a bar and a reset countdown. The context window gets a bar broken down by what fills it. Click the band to fold it into a single line.
+Token Watch is a Claude Code [mod](https://code.claude.com/docs/en/plugins/mods/overview). It draws a small band above the prompt with your plan usage and your context window. The 5-hour and weekly windows each get a bar and a reset countdown. The context window gets a bar broken down by what fills it. Click the band to fold it into a single line. Where Claude Code draws no mod (the VS Code extension's chat panel), `/context-bar` answers with the reading as a line of text, and the companion extension [Token Watch for VS Code](https://github.com/nevermemo/token-watch-vscode) shows it in the status bar.
 
 Expanded:
 
@@ -44,13 +44,15 @@ In the real band each bar is filled in proportion and coloured: a coloured fill 
 ## Using it
 
 - **Click anywhere on the band** to collapse it to one line, or to expand it again.
-- **`/context-bar`** hides or shows the band.
+- **`/context-bar`** hides or shows the band. Where the band can't be drawn (the VS Code extension's chat panel, `claude -p`), it answers with the reading as one line instead: `5H 62% (2h 14m) · WK 31% (3d 4h) · CTX 21% (212k / 1M)`.
+- **`/context-bar text`** answers with that line anywhere.
+- **`/context-bar file`** says where the usage snapshot is and when it was last written.
 - **Saved choices:** both settings are kept across sessions.
 - **Narrow windows:** the collapsed line never wraps. As the window narrows, the small usage bars drop first, then the `99k / 1M` detail. The percentages always stay.
 
 ## Install
 
-**Requirements:** Claude Code **2.1.287 or later** (`claude --version`). Token Watch draws in **the terminal** and in **the Code tab of the Claude desktop app**.
+**Requirements:** Claude Code **2.1.287 or later** (`claude --version`). Token Watch draws in **the terminal** and in **the Code tab of the Claude desktop app**. Token Watch for VS Code needs Token Watch 1.1.0 or later.
 
 ### Install from GitHub
 
@@ -110,28 +112,72 @@ claude plugin uninstall token-watch@token-watch
 |---------------------------|-------------|
 | `claude` in a terminal (including editor terminals and JetBrains) | Shown |
 | The Code tab of the Claude desktop app | Shown |
-| The VS Code extension's chat panel, `claude -p`, the Agent SDK | Loads but isn't drawn: Claude Code shows no mod drawings there |
+| The VS Code extension's chat panel, `claude -p`, the Agent SDK | Loads; nothing is drawn, so `/context-bar` answers with the reading as text. In VS Code, [Token Watch for VS Code](https://github.com/nevermemo/token-watch-vscode) shows it in the status bar. The chat panel runs the Claude Code bundled with the extension, which loads mods from version 2.1.287. |
 | Cloud sessions | Isn't drawn: cloud sessions don't load plugins installed on your machine, and don't show mod drawings |
+
+## Token Watch for VS Code
+
+The VS Code extension's chat panel shows no mod drawings, so Token Watch has a companion: [Token Watch for VS Code](https://github.com/nevermemo/token-watch-vscode) puts `5H 62% · WK 31% · CTX 21%` in the status bar, with the reset countdowns and the context breakdown in a tooltip and a panel that draws the same bars. It reads the usage snapshot below and nothing else.
+
+To install it, download `token-watch-0.1.0.vsix` from the [releases page](https://github.com/nevermemo/token-watch-vscode/releases), then run `code --install-extension token-watch-0.1.0.vsix`, or use Extensions → ⋯ → Install from VSIX…. It is not yet published to the VS Code Marketplace or Open VSX. Keep Token Watch 1.1.0 or later installed, and open any Claude Code session: the terminal, the desktop app or the chat panel.
+
+## The usage snapshot
+
+After each reading, Token Watch writes one small JSON file, `~/.claude/token-watch/usage.json` (`~` is `USERPROFILE` on Windows, else `HOME`), and writes it again every 30 seconds while the session is alive. With several sessions open, the most recently active one keeps the file; another takes over once that snapshot is more than 150 seconds old. A reader treats a snapshot older than that as a session that has ended.
+
+**Off:** turn off **Usage snapshot file** in `/config`, or in `/plugin` → token-watch → **Configure options**. `/context-bar file` shows the path and the last write.
+
+**Schema 1:**
+
+```json
+{
+  "schema": 1,
+  "writtenAt": "2026-10-03T12:00:00.000Z",
+  "session": { "id": "4d1f…", "cwd": "C:\\Users\\micro\\proj" },
+  "windows": [
+    { "kind": "five_hour", "label": "5H", "percentUsed": 62.4, "resetsAt": "2026-10-03T14:14:00.000Z" },
+    { "kind": "seven_day", "label": "WK", "percentUsed": 31, "resetsAt": "2026-10-06T16:00:00.000Z" }
+  ],
+  "context": {
+    "total": 212200, "window": 1000000, "percent": 21, "compactsAt": 950000,
+    "categories": [
+      { "label": "messages", "tokens": 186000, "color": "#d97757", "kind": "used" },
+      { "label": "free", "tokens": 738000, "color": "inactive", "kind": "free" },
+      { "label": "buffer", "tokens": 50000, "color": "inactive", "kind": "buffer" }
+    ]
+  }
+}
+```
+
+- `windows`: in the band's order, with its labels (`5H`, `WK`, `FB`…), `percentUsed` as reported and `resetsAt` as ISO 8601 or `null`. A window whose `resetsAt` has passed has started over: show it at 0%.
+- `context`: `null` until the first breakdown. `categories` are the `/context` rows with their colours; a `free` or `buffer` row's colour is whatever Claude Code reports, so draw those with a track colour. The reserve past the auto-compact point is `window - compactsAt`.
+- `session`: the session's id and working directory, or `null` where Claude Code has none.
+- The file is rewritten in place, not atomically: a reader that fails to parse it should read again a moment later.
 
 ## Privacy and permissions
 
-Token Watch only reads numbers Claude Code already has. It makes **no network requests**, reads **no files or environment variables**, starts **no processes**, and never touches your prompts or tool calls.
+Token Watch only reads numbers Claude Code already has. It makes **no network requests**, starts **no processes**, and never touches your prompts or tool calls. It writes **one file** on your machine, the [usage snapshot](#the-usage-snapshot), reads nothing but that file's timestamp, and reads two environment variables to find your home directory. The snapshot can be turned off.
 
 You can check this yourself before installing: `claude plugin validate ./token-watch` lists every hook a mod registers and every API it calls. For Token Watch:
 
 - **Hooks:** `session.start`, `session.measure`, `command.run` (for `/context-bar`), `ui.message` (the click), and `ui.render` (the band above the prompt).
 - **Calls:**
   - `$.session.usage`: the context breakdown and usage windows. Claude Code estimates these locally, without extra API requests.
-  - `$.clock`: the reset countdowns.
+  - `$.session.surfaces`, `$.session.id`, `$.session.cwd`: where the session draws (so `/context-bar` knows whether to toggle the band or answer as text), and the session's id and directory for the snapshot.
+  - `$.clock`: the reset countdowns and the snapshot's 30-second refresh.
   - `$.command.register`: adds `/context-bar`.
   - `$.store`: remembers your choices and the last usage seen.
   - `$.state` and `$.ui.resolve`: share data between the mod's hooks and draw the band.
+  - `$.env.get` (`USERPROFILE`, `HOME`): your home directory, for the snapshot's path. Nothing else is read from the environment.
+  - `$.fs.write` and `$.fs.stat`: write the snapshot and check its timestamp. No other file is written, and no file is read.
 
 **What it saves:** `$.store` keeps four things in Claude Code's own plugin storage on your machine:
 - whether the band is collapsed,
 - whether it's hidden,
 - the last usage percentages,
 - their reset times.
+
+The snapshot file is described [above](#the-usage-snapshot).
 
 ## Good to know
 
@@ -144,9 +190,9 @@ You can check this yourself before installing: `claude plugin validate ./token-w
 
 | Hook | What it does |
 |------|--------------|
-| `session.start` | Registers `/context-bar`, restores the saved choices and the last usage seen, takes a first reading, and ticks a clock every 30 seconds for the countdowns. |
-| `session.measure` | Takes a new reading after each turn, and whenever a usage window changes. |
-| `command.run` (`context-bar`) | Shows or hides the band. |
+| `session.start` | Registers `/context-bar`, restores the saved choices and the last usage seen, takes a first reading, and ticks a clock every 30 seconds for the countdowns. On the same tick it refreshes the usage snapshot while this session is the one that wrote it last. |
+| `session.measure` | Takes a new reading after each turn, and whenever a usage window changes, band shown or not, and writes the snapshot when the figures changed. |
+| `command.run` (`context-bar`) | Shows or hides the band where it draws; answers with the reading as text where nothing draws, with `text`, or with the snapshot's path with `file`. |
 | `ui.render` (`AbovePrompt`) | Draws the band as a client module ([`hooks/band.tsx`](hooks/band.tsx)). The band lays itself out to the available width and reports clicks. Other mods drawing above the prompt keep their place; Token Watch adds its band beneath theirs. |
 | `ui.message` | Receives the click and flips between expanded and collapsed. |
 
@@ -161,6 +207,7 @@ token-watch/
 ├── hooks/hooks.json                  points Claude Code at register.tsx
 ├── hooks/register.tsx                hooks, readings and saved state
 ├── hooks/band.tsx                    the band: layout, bars, legend, clicks
+├── hooks/format.ts                   names, order, countdowns and token counts, shared by the band, the text reply and the snapshot
 ├── types/index.d.ts                  shared types and state declarations
 ├── tests/context-bar.test.tsx        tests for the terminal and desktop surfaces
 ├── CHANGELOG.md                      release notes
@@ -183,7 +230,9 @@ claude plugin test .
 - sessions without plan limits,
 - restoring saved usage,
 - windows that reset,
-- sharing the band with another mod.
+- sharing the band with another mod,
+- the text reply where nothing draws (the VS Code chat panel, headless),
+- the usage snapshot: its content, the heartbeat, several sessions, the off switch.
 
 **Seeing your edits:**
 - In an open session, `/reload-plugins` reads the plugin straight from its folder.

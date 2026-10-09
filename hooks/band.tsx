@@ -34,6 +34,7 @@
 import type { ClientModule } from 'claude-code'
 
 import type { BandProps, Limit, Reading } from '../types'
+import { countdown, label, levelColor, short, sorted } from './format'
 
 type Local = { isHovered: boolean }
 
@@ -48,24 +49,6 @@ const RESERVE = '#2e3139'
 // What a terminal draws a piece with: a lower block, the one glyph that is
 // shorter than its cell.
 const GLYPH = '▆'
-
-// Usage windows by kind, in the order they are drawn; any other window the
-// API sends is drawn after them.
-const WINDOWS: Record<string, string> = {
-  five_hour: '5H',
-  seven_day: 'WK',
-  spend_limit: '$$',
-}
-const ORDER = Object.keys(WINDOWS)
-
-// Windows Claude Code does not list today but the API may send, such as a
-// model's own allowance: named by the model when the kind mentions one.
-const MODELS: [RegExp, string][] = [
-  [/fable/i, 'FB'],
-  [/opus/i, 'OP'],
-  [/sonnet/i, 'SN'],
-  [/haiku/i, 'HK'],
-]
 
 // The legend's shorter names for the longer category labels.
 const LEGEND: Record<string, string> = {
@@ -288,48 +271,12 @@ function fit(columns: number, limits: Limit[], percent: number, detail: string) 
   return { showDetail, showMeters }
 }
 
-function sorted(list: Limit[]) {
-  const rank = (kind: string) => (ORDER.includes(kind) ? ORDER.indexOf(kind) : ORDER.length)
-  return [...list].sort((a, b) => rank(a.kind) - rank(b.kind))
-}
-
-function label(limit: Limit) {
-  return WINDOWS[limit.kind] ?? MODELS.find(([pattern]) => pattern.test(limit.kind))?.[1] ?? limit.kind
-}
-
-// Time left until a window resets: "3d 4h", "2h 14m", "9m".
-function countdown(resetsAt: string | undefined, nowMs: number) {
-  if (!resetsAt || !nowMs) return ''
-  const ms = Date.parse(resetsAt) - nowMs
-  if (Number.isNaN(ms)) return ''
-  if (ms <= 0) return 'now'
-  const minutes = Math.floor(ms / 60_000)
-  const days = Math.floor(minutes / 1_440)
-  const hours = Math.floor((minutes % 1_440) / 60)
-  if (days > 0) return `${days}d ${hours}h`
-  if (hours > 0) return `${hours}h ${String(minutes % 60).padStart(2, '0')}m`
-  return `${Math.max(1, minutes)}m`
-}
-
 // A share of the window in parts per 10,000, the most flexGrow takes.
 function grow(tokens: number, window: number) {
   return Math.min(10_000, Math.round((tokens / window) * 10_000 * 100) / 100)
 }
 
-function levelColor(percent: number) {
-  if (percent < 50) return '#8fd18f'
-  if (percent < 80) return '#e8c66a'
-  return '#e06c6c'
-}
-
 // The percentages in both views: plain text, yellow from 50%, red from 80%.
 function warning(percent: number) {
   return percent < 50 ? {} : { color: levelColor(percent) }
-}
-
-function short(n: number) {
-  if (n >= 1_000_000) return `${+(n / 1_000_000).toFixed(1)}M`
-  if (n >= 10_000) return `${Math.round(n / 1_000)}k`
-  if (n >= 1_000) return `${+(n / 1_000).toFixed(1)}k`
-  return String(n)
 }

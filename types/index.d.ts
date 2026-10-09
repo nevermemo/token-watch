@@ -17,6 +17,33 @@ export type Reading = {
 // One plan usage window (five_hour, seven_day), as the status line has it.
 export type Limit = { kind: string; percentUsed: number; resetsAt?: string }
 
+// One usage window as the snapshot lists it: the band's label beside the kind.
+export type SnapshotWindow = {
+  kind: string
+  label: string
+  percentUsed: number
+  resetsAt: string | null
+}
+
+// The usage snapshot written to ~/.claude/token-watch/usage.json after each
+// reading, for Token Watch for VS Code or any other local reader. A window
+// whose resetsAt has passed has started over: show it at 0%. A snapshot
+// whose writtenAt is more than a few minutes old was left by a session that
+// has ended.
+export type Snapshot = {
+  schema: 1
+  writtenAt: string
+  session: { id: string | null; cwd: string | null }
+  windows: SnapshotWindow[]
+  context: {
+    total: number
+    window: number
+    percent: number
+    compactsAt: number | null
+    categories: Slice[]
+  } | null
+}
+
 // What the hooks module hands the band's Client.
 export type BandProps = {
   reading: Reading

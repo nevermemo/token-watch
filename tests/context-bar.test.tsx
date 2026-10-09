@@ -59,25 +59,69 @@ const count = (s: string, part: string) => s.split(part).length - 1
 
 const click = { type: 'up', x: 5, y: 0, button: 'left' } as const
 
-// `beneath`: text a mod beneath this one draws in the band, if any.
-// `stored`: what the mod's store holds from earlier sessions.
-async function start($, on, surface, rateLimits: unknown[], beneath?: string, stored?: Record<string, unknown>) {
-  mock.store(on, stored)
-  mock.clock(on, { now: NOW })
+type Boot = {
+  // What $.session.surfaces() answers; [surface] by default, none for null.
+  surfaces?: readonly string[]
+  // Text a mod beneath this one draws in the band, if any.
+  beneath?: string
+  // What the mod's store holds from earlier sessions.
+  stored?: Record<string, unknown>
+  // The environment; USERPROFILE set by default.
+  env?: Record<string, string>
+  // The snapshot file's mtime as $.fs.stat answers it; absent, no file.
+  statMtimeMs?: number
+}
+
+type Write = { path: string; text: string }
+
+// Starts a session with the engine's answers stubbed: the clock at NOW, the
+// store (readable back as `saved`), the environment, the usage, the
+// session's surfaces, id and cwd, and the file system (every $.fs.write is
+// collected in `writes`).
+async function boot($, on, surface: 'terminal' | 'desktop' | null, rateLimits: unknown[], options: Boot = {}) {
+  const writes: Write[] = []
+  const saved = new Map<string, unknown>(Object.entries(options.stored ?? {}))
+  const clock = mock.clock(on, { now: NOW })
+  mock.env(on, options.env ?? { USERPROFILE: 'C:/Users/test' })
+  on('store.get', ($, e) => ({ value: saved.get(e.key) }) as never)
+  on('store.set', ($, e) => {
+    saved.set(e.key, e.value)
+    return { value: undefined } as never
+  })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('session.measure', ($, e) => ({ changed: e.changed }))
   on('command.register', ($, e) => ({ value: { command: e.name } }) as never)
   on('ui.render', ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
-    return beneath ? <Text>{beneath}</Text> : <Box />
+    return options.beneath ? <Text>{options.beneath}</Text> : <Box />
   })
   on('session.usage', () => ({ value: usage(rateLimits) }) as never)
+  on('session.surfaces', () => ({ value: options.surfaces ?? (surface ? [surface] : []) }) as never)
+  on('session.id', () => ({ value: 'sess-1' }) as never)
+  on('session.cwd', () => ({ value: 'C:/proj' }) as never)
+  on('fs.stat', () =>
+    (options.statMtimeMs === undefined
+      ? { deny: 'ENOENT' }
+      : { value: { kind: 'file', size: 1, mtimeMs: options.statMtimeMs, isLink: false } }) as never,
+  )
+  on('fs.write', ($, e) => {
+    writes.push({ path: e.path, text: e.text })
+    return { value: undefined } as never
+  })
   await $.session.start({ cwd: '.', surface, isInteractive: true } as never)
 
+  return { writes, saved, clock }
+}
+
+// `beneath`: text a mod beneath this one draws in the band, if any.
+// `stored`: what the mod's store holds from earlier sessions.
+async function start($, on, surface, rateLimits: unknown[], beneath?: string, stored?: Record<string, unknown>) {
+  const { writes, saved, clock } = await boot($, on, surface, rateLimits, { beneath, stored })
   const ui = await $.ui.mount({ ...BAND, surface } as never)
   await ui.resize({ columns: 116, rows: 6, in: 'band' })
   const band = async () => JSON.stringify(await ui.drawn({ in: 'band' }))
 
-  return { ui, band }
+  return { ui, band, writes, saved, clock }
 }
 
 describe('context bar', () => {
@@ -343,4 +387,159 @@ describe('context bar', () => {
       expect(collapsed).not.toContain('"width":10,"height":1')
     })
   }
+})
+
+const LINE = '5H 62% (2h 14m) · WK 31% (3d 4h) · CTX 21% (212k / 1M)'
+const MEASURE = { context: { tokens: 212_200, window: 1_000_000, percent: 21 }, rateLimits: RATE_LIMITS, changed: ['context'] }
+const SNAPSHOT_PATH = 'C:/Users/test/.claude/token-watch/usage.json'
+const run = ($, args: string) => $.command.run({ command: 'context-bar', args } as never)
+// The engine hands $.fs.write the path resolved to the platform's own form
+// (backslashes on Windows), whatever string the mod gave; the mod's own
+// spelling is what /context-bar file reports.
+const slash = (p: string) => p.replace(/\\/g, '/')
+
+describe('context-bar as text', () => {
+  test('where nothing draws (the VS Code chat panel), /context-bar answers the reading and hides nothing', async ($, on) => {
+    const { saved } = await boot($, on, null, RATE_LIMITS, { surfaces: ['vscode'] })
+    expect((await run($, '')).text).toBe(LINE)
+    expect((await run($, '')).text).toBe(LINE)
+    expect(saved.get('isShown')).toBeUndefined()
+  })
+
+  test('a headless run with no surface gets the same line', async ($, on) => {
+    await boot($, on, null, RATE_LIMITS, { surfaces: [] })
+    expect((await run($, '')).text).toBe(LINE)
+  })
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    test(`${surface}: /context-bar text answers the line and leaves the band as it is`, async ($, on) => {
+      const { band, saved } = await start($, on, surface, RATE_LIMITS)
+      expect((await run($, 'text')).text).toBe(LINE)
+      expect(await band()).toContain('"CTX"')
+      expect(saved.get('isShown')).toBeUndefined()
+      expect((await run($, 'nonsense')).text).toBe('Usage: /context-bar [text|file]')
+      expect((await run($, '')).text).toBe('Token Watch hidden.')
+    })
+  }
+
+  test('without plan limits the line is the context alone', async ($, on) => {
+    await boot($, on, null, [], { surfaces: ['vscode'] })
+    expect((await run($, '')).text).toBe('CTX 21% (212k / 1M)')
+  })
+
+  test('extra windows follow 5H and WK, named by model where the kind names one', async ($, on) => {
+    const extra = [
+      { kind: 'seven_day_fable', percentUsed: 88, resetsAt: RATE_LIMITS[0].resetsAt },
+      { kind: 'mystery_window', percentUsed: 5 },
+    ]
+    await boot($, on, null, [...extra, ...RATE_LIMITS], { surfaces: ['vscode'] })
+    expect((await run($, '')).text).toBe(
+      '5H 62% (2h 14m) · WK 31% (3d 4h) · FB 88% (3d 4h) · mystery_window 5% · CTX 21% (212k / 1M)',
+    )
+  })
+
+  test('a window whose reset time has passed reads 0% with no countdown', async ($, on) => {
+    const past = new Date(NOW - MINUTE).toISOString()
+    const saved = [RATE_LIMITS[1], { kind: 'seven_day', percentUsed: 90, resetsAt: past }]
+    await boot($, on, null, [], { surfaces: ['vscode'], stored: { limits: saved } })
+    expect((await run($, '')).text).toBe('5H 62% (2h 14m) · WK 0% · CTX 21% (212k / 1M)')
+  })
+})
+
+describe('usage snapshot', () => {
+  test('the first reading writes ~/.claude/token-watch/usage.json', async ($, on) => {
+    const { writes } = await boot($, on, 'terminal', RATE_LIMITS)
+    expect(writes.length).toBe(1)
+    expect(slash(writes[0].path)).toBe(SNAPSHOT_PATH)
+    expect(writes[0].text.endsWith('\n')).toBe(true)
+    const snapshot = JSON.parse(writes[0].text)
+    expect(snapshot.schema).toBe(1)
+    expect(snapshot.writtenAt).toBe('2026-10-03T12:00:00.000Z')
+    expect(snapshot.session).toEqual({ id: 'sess-1', cwd: 'C:/proj' })
+    // The windows in the band's order with its labels, as reported: a
+    // reader shows one whose reset time has passed at 0%.
+    expect(snapshot.windows).toEqual([
+      { kind: 'five_hour', label: '5H', percentUsed: 62.4, resetsAt: RATE_LIMITS[1].resetsAt },
+      { kind: 'seven_day', label: 'WK', percentUsed: 31, resetsAt: RATE_LIMITS[0].resetsAt },
+    ])
+    expect(snapshot.context.total).toBe(212_200)
+    expect(snapshot.context.window).toBe(1_000_000)
+    expect(snapshot.context.percent).toBe(21)
+    expect(snapshot.context.compactsAt).toBe(950_000)
+    expect(snapshot.context.categories.map((c: { label: string }) => c.label)).toEqual([
+      'system prompt', 'tools', 'mcp tools', 'agents', 'memory files', 'skills', 'messages', 'free', 'buffer',
+    ])
+    expect(snapshot.context.categories.find((c: { label: string }) => c.label === 'messages')).toEqual({
+      label: 'messages', tokens: 186_000, color: '#d97757', kind: 'used',
+    })
+  })
+
+  test('the path is joined with the separator of the home directory', async ($, on) => {
+    await boot($, on, 'terminal', RATE_LIMITS, { env: { USERPROFILE: 'C:\\Users\\micro\\' } })
+    expect((await run($, 'file')).text).toBe(
+      'Token Watch snapshot: C:\\Users\\micro\\.claude\\token-watch\\usage.json (written 0s ago).',
+    )
+  })
+
+  test('on a POSIX home (HOME only) the path uses slashes', async ($, on) => {
+    await boot($, on, 'terminal', RATE_LIMITS, { env: { HOME: '/home/micro/' } })
+    expect((await run($, 'file')).text).toBe(
+      'Token Watch snapshot: /home/micro/.claude/token-watch/usage.json (written 0s ago).',
+    )
+  })
+
+  test('a reading with the same figures is not written again; a changed one is', async ($, on) => {
+    const limits = [...RATE_LIMITS]
+    const { writes } = await boot($, on, 'terminal', limits)
+    await $.session.measure(MEASURE as never)
+    expect(writes.length).toBe(1)
+    limits[1] = { ...RATE_LIMITS[1], percentUsed: 70 }
+    await $.session.measure(MEASURE as never)
+    expect(writes.length).toBe(2)
+    expect(JSON.parse(writes[1].text).windows[0].percentUsed).toBe(70)
+  })
+
+  test('with the band hidden, readings still feed the snapshot', async ($, on) => {
+    const limits = [...RATE_LIMITS]
+    const { writes } = await boot($, on, 'terminal', limits, { stored: { isShown: false } })
+    limits[1] = { ...RATE_LIMITS[1], percentUsed: 70 }
+    await $.session.measure(MEASURE as never)
+    expect(writes.length).toBe(2)
+  })
+
+  test('every 30s the snapshot is written again, so a reader can tell the session is alive', async ($, on) => {
+    const { writes, clock } = await boot($, on, 'terminal', RATE_LIMITS)
+    await clock.advance(30_000)
+    expect(writes.length).toBe(2)
+    expect(JSON.parse(writes[1].text).writtenAt).toBe('2026-10-03T12:00:30.000Z')
+  })
+
+  test('another session that wrote more recently keeps the file until its snapshot goes stale', async ($, on) => {
+    // The file's mtime is 5s past this session's own write: another session's.
+    const { writes, clock } = await boot($, on, 'terminal', RATE_LIMITS, { statMtimeMs: NOW + 5_000 })
+    await clock.advance(30_000)
+    expect(writes.length).toBe(1)
+    // 180s on, that snapshot is 175s old, past the 150s it stays fresh.
+    await clock.advance(150_000)
+    expect(writes.length).toBe(2)
+  })
+
+  test('the snapshot option turns the file off', { options: { snapshot: false } }, async ($, on) => {
+    const { writes, clock } = await boot($, on, 'terminal', RATE_LIMITS)
+    await clock.advance(30_000)
+    expect(writes.length).toBe(0)
+    expect((await run($, 'file')).text).toContain('off')
+  })
+
+  test('with no home directory there is nowhere to write, and /context-bar file says so', async ($, on) => {
+    const { writes } = await boot($, on, 'terminal', RATE_LIMITS, { env: {} })
+    expect(writes.length).toBe(0)
+    expect((await run($, 'file')).text).toContain('nowhere to write')
+  })
+
+  test('/context-bar file names the snapshot and its age', async ($, on) => {
+    const { clock } = await boot($, on, 'terminal', RATE_LIMITS)
+    await clock.advance(12_000)
+    expect((await run($, 'file')).text).toBe(`Token Watch snapshot: ${SNAPSHOT_PATH} (written 12s ago).`)
+  })
 })
