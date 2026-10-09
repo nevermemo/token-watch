@@ -1,0 +1,188 @@
+// Token Watch: plan usage (the 5-hour and weekly windows, and any other window
+// Claude Code reports) and the context window as thin bars above the prompt, one colour per category the way /context
+// breaks it down. A click anywhere on the band collapses it to one row;
+// /context-bar shows or hides it.
+//
+// session.start: register /context-bar, restore the saved choices and the last
+//   usage windows seen (a new session has none until its first response), take a
+//   reading, and tick a clock every 30s so the reset countdowns stay current.
+// session.measure: after each main-thread turn, or when a usage window moves,
+//   take a reading.
+// command.run (context-bar): show or hide the band.
+// ui.render (AbovePrompt): the band, drawn by the Client in ./band.tsx, which
+//   lays itself out to the room it is given and reports clicks.
+// ui.message: the band was clicked; flip collapsed.
+//
+// A reading is $.session.usage({ breakdown: 'summary' }): the /context rows,
+// estimated locally, so it costs no token-count request, and the plan's
+// rate-limit windows as the status line has them (none off a subscription).
+
+import { atom, read, update } from 'claude-code'
+import type { Register } from 'claude-code'
+
+import type { BandProps, Limit, Reading, Slice } from '../types'
+
+const reading = atom({ plugin: 'token-watch', key: 'reading' } as const, null)
+const isShown = atom({ plugin: 'token-watch', key: 'isShown' } as const, true)
+const isCollapsed = atom({ plugin: 'token-watch', key: 'isCollapsed' } as const, false)
+const limits = atom({ plugin: 'token-watch', key: 'limits' } as const, [])
+const nowMs = atom({ plugin: 'token-watch', key: 'nowMs' } as const, 0)
+
+// /context's row names, shortened for the legend.
+const LABELS: Record<string, string> = {
+  'system tools': 'tools',
+  'custom agents': 'agents',
+  'free space': 'free',
+  'autocompact buffer': 'buffer',
+}
+
+const COLORS: Record<string, string> = {
+  'system prompt': '#7b9cd8',
+  tools: '#7ecfc4',
+  'mcp tools': '#a78bfa',
+  agents: '#8fd18f',
+  'memory files': '#e8c66a',
+  skills: '#e89bb8',
+  messages: '#d97757',
+}
+
+export const register: Register = on => {
+  on('session.start', async ($, e, next) => {
+    const result = await next(e)
+    await $.command.register({
+      name: 'context-bar',
+      description: 'Show or hide the Token Watch band (plan usage and context) above the prompt',
+    })
+    const shown = await $.store.get('isShown')
+    const collapsed = await $.store.get('isCollapsed')
+    await update($, isShown, () => shown !== false)
+    await update($, isCollapsed, () => collapsed === true)
+    await tick($)
+    // A new session has no usage windows until its first response, so start
+    // from the last ones seen; any whose reset time has passed is drawn at 0%,
+    // and the first response replaces them.
+    const saved = await $.store.get('limits')
+    if (Array.isArray(saved)) {
+      await update($, limits, () => saved as Limit[])
+    }
+    await takeReading($)
+    $.clock.every(30_000, () => void tick($))
+
+    return result
+  })
+
+  on('session.measure', async ($, e, next) => {
+    const result = await next(e)
+    if (await read($, isShown)) {
+      await tick($)
+      await takeReading($)
+    }
+
+    return result
+  })
+
+  on('command.run', { command: 'context-bar' }, async $ => {
+    const shown = !(await read($, isShown))
+    await update($, isShown, () => shown)
+    await $.store.set('isShown', shown)
+    if (shown) {
+      await takeReading($)
+    }
+
+    return { text: shown ? 'Token Watch shown.' : 'Token Watch hidden.' }
+  })
+
+  on('ui.message', async ($, e, next) => {
+    if ((e.data as { toggle?: boolean } | null)?.toggle !== true) {
+      return next(e)
+    }
+    const collapsed = !(await read($, isCollapsed))
+    await update($, isCollapsed, () => collapsed)
+    await $.store.set('isCollapsed', collapsed)
+
+    return {}
+  })
+
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const now = await read($, reading)
+    if (e.props.hasSurvey || now === null || !(await read($, isShown))) {
+      return next(e)
+    }
+
+    // The band holds one drawing, so whatever the plugins beneath draw there
+    // (another mod's hint) stacks above this band instead of being replaced.
+    const below = await next(e)
+    const { Box, Client } = $.ui.resolve(e)
+    const clock = await read($, nowMs)
+    const props: BandProps = {
+      reading: now,
+      limits: current(await read($, limits), clock),
+      nowMs: clock,
+      isCollapsed: await read($, isCollapsed),
+      surface: e.surface,
+    }
+
+    return (
+      <Box flexDirection="column">
+        {below}
+        <Client key="band" module="./band.tsx" props={props} width="100%" />
+      </Box>
+    )
+  })
+}
+
+async function takeReading($) {
+  try {
+    const { context, rateLimits } = await $.session.usage({ breakdown: 'summary' })
+    if (rateLimits.length > 0) {
+      const reported: Limit[] = rateLimits.map(({ kind, percentUsed, resetsAt }) => ({ kind, percentUsed, resetsAt }))
+      // A window the reading leaves out keeps its last values until its reset
+      // time; one still left out after that is no longer part of the plan.
+      const now = await $.clock.now()
+      const kept = (await read($, limits)).filter(
+        w => !reported.some(r => r.kind === w.kind) && !!w.resetsAt && Date.parse(w.resetsAt) > now,
+      )
+      const windows = [...reported, ...kept]
+      await update($, limits, () => windows)
+      await $.store.set('limits', windows)
+    }
+    const breakdown = context.breakdown
+    if (!breakdown || !breakdown.rawMaxTokens) {
+      return
+    }
+    const slices: Slice[] = breakdown.categories
+      .filter(row => row.kind !== 'deferred' && row.tokens > 0)
+      .map(row => {
+        const name = row.name.toLowerCase()
+        const label = LABELS[name] ?? name
+        return {
+          label,
+          tokens: row.tokens,
+          color: COLORS[label] ?? row.color,
+          kind: row.kind as Slice['kind'],
+        }
+      })
+    const next: Reading = {
+      slices,
+      total: breakdown.totalTokens,
+      window: breakdown.rawMaxTokens,
+      compactsAt: breakdown.isAutoCompactEnabled ? (breakdown.autoCompactThreshold ?? null) : null,
+    }
+    await update($, reading, () => next)
+  } catch {
+    // No reading this time; the band keeps the last one.
+  }
+}
+
+async function tick($) {
+  const now = await $.clock.now()
+  await update($, nowMs, () => now)
+}
+
+// The windows as they stand now: one whose reset time has passed has started
+// over, so it is drawn at 0% until a response reports it again.
+function current(windows: Limit[], nowMs: number) {
+  return windows.map(w =>
+    !w.resetsAt || !nowMs || Date.parse(w.resetsAt) > nowMs ? w : { kind: w.kind, percentUsed: 0 },
+  )
+}

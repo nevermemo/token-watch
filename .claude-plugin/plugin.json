@@ -1,0 +1,13 @@
+{
+  "name": "token-watch",
+  "version": "1.0.0",
+  "description": "Plan usage (5-hour, weekly and any model window) and the context window as thin bars above the prompt. Click to collapse to one line; /context-bar to hide.",
+  "author": {
+    "name": "Kadir Mert Okumus"
+  },
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/nevermemo/token-watch",
+  "repository": "https://github.com/nevermemo/token-watch",
+  "keywords": ["mod", "context", "usage", "rate-limits", "tokens"],
+  "types": "./types/index.d.ts"
+}
