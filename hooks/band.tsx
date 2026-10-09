@@ -29,14 +29,30 @@
 //   the meters are drawn only while the context bar keeps 20 cells, the
 //   detail only while it keeps 8, and below that the bar takes what is left,
 //   so the line never wraps.
-// A left click anywhere posts { toggle: true } to the hooks module.
+// Without bars (a left click on the collapsed line): the line's labels,
+//   percentages and detail alone. The expanded table always has its bars.
+//
+// The pointer, as in Token Watch for VS Code:
+// - left click on the collapsed line: its bars on or off; posts
+//   { action: 'bars' }. On the expanded table it does nothing.
+// - right click: expand or collapse; posts { action: 'collapse' }.
+// - hover: resting on the collapsed line for PEEK_MS shows the expanded view
+//   until the pointer leaves, a peek that changes nothing saved.
 
 import type { ClientModule } from 'claude-code'
 
 import type { BandProps, Limit, Reading } from '../types'
 import { countdown, label, levelColor, short, sorted } from './format'
 
-type Local = { isHovered: boolean }
+// Local state: whether the pointer is over the band, how many hover ticks it
+// has rested there, and whether that has opened a peek.
+type Local = { isHovered: boolean; hoverTicks: number; isPeeking: boolean }
+
+// The hover peek: a tick every HOVER_TICK_MS, and the peek opens after
+// PEEK_TICKS of them (about half a second), so a pointer passing over on its
+// way to the prompt does not make the band jump.
+const HOVER_TICK_MS = 150
+const PEEK_TICKS = 3
 
 type Row = { label: string; bar: unknown[]; percent: number; detail: string }
 
@@ -78,19 +94,44 @@ const METERS_BAR_MIN = 20
 
 const Band: ClientModule<BandProps, Local> = (props, surface) => {
   const { Box, Text } = surface.elements
-  const { reading: now, isCollapsed, nowMs } = props
+  const { reading: now, nowMs, showBars } = props
   const limits = sorted(props.limits)
-  const isHovered = surface.state?.isHovered ?? false
+  const local: Local = surface.state ?? { isHovered: false, hoverTicks: 0, isPeeking: false }
+  const { isHovered } = local
+
+  // Once per instance: the hover clock. It redraws only while the pointer
+  // rests on the band, until the peek opens.
+  if (surface.state === undefined) {
+    surface.every(HOVER_TICK_MS, () => {
+      const state = surface.state
+      if (!state?.isHovered || state.isPeeking) return
+      const hoverTicks = state.hoverTicks + 1
+      surface.setState({ ...state, hoverTicks, isPeeking: hoverTicks >= PEEK_TICKS })
+    })
+    surface.setState(local)
+  }
 
   surface.onPointer(event => {
+    // Read the state as it is now, not as it was when this render ran: an
+    // enter and a leave can both arrive before the next frame.
+    const state = surface.state ?? local
     if (event.type === 'up' && event.button === 'left') {
-      surface.post({ toggle: true })
-    } else if (event.type === 'enter' && !isHovered) {
-      surface.setState({ isHovered: true })
-    } else if (event.type === 'leave' && isHovered) {
-      surface.setState({ isHovered: false })
+      // A peek shows the expanded table, and a left click on it does nothing.
+      if (props.isCollapsed && !state.isPeeking) surface.post({ action: 'bars' })
+    } else if (event.type === 'up' && event.button === 'right') {
+      // A click ends any peek and restarts the hover clock, so the new state
+      // is what shows next.
+      surface.setState({ ...state, hoverTicks: 0, isPeeking: false })
+      surface.post({ action: 'collapse' })
+    } else if (event.type === 'enter') {
+      surface.setState({ isHovered: true, hoverTicks: 0, isPeeking: false })
+    } else if (event.type === 'leave') {
+      surface.setState({ isHovered: false, hoverTicks: 0, isPeeking: false })
     }
   })
+
+  // A peek shows the expanded view over a collapsed band.
+  const isCollapsed = props.isCollapsed && !local.isPeeking
 
   const percent = Math.round((now.total / now.window) * 100)
 
@@ -98,7 +139,7 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
 
   if (isCollapsed) {
     const detail = `${short(now.total)} / ${short(now.window)}`
-    const { showDetail, showMeters } = fit(surface.columns, limits, percent, detail)
+    const { showDetail, showMeters } = fit(surface.columns, limits, percent, detail, showBars)
     return (
       <Box flexDirection="row" alignItems="center" columnGap={CELL_GAP} paddingX={1}>
         {limits.map(limit => (
@@ -121,9 +162,11 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
               CTX
             </Text>
           </Box>
-          <Box flexDirection="row" flexGrow={1} minWidth={4} height={1} alignItems="center">
-            {bar(draw, now, TRACK, RESERVE)}
-          </Box>
+          {showBars && (
+            <Box flexDirection="row" flexGrow={1} minWidth={4} height={1} alignItems="center">
+              {bar(draw, now, TRACK, RESERVE)}
+            </Box>
+          )}
           <Box flexShrink={0}>
             <Text wrap="truncate" {...warning(percent)}>{`${percent}%`}</Text>
           </Box>
@@ -264,7 +307,7 @@ function meter(draw: Draw, percentUsed: number) {
 // meters. Counted in cells, the bar's room being what is left after the
 // padding, labels, percentages and gaps; the desktop's proportional text
 // measures a little wider, which the bar absorbs.
-function fit(columns: number, limits: Limit[], percent: number, detail: string) {
+function fit(columns: number, limits: Limit[], percent: number, detail: string, showBars: boolean) {
   const usage = limits.reduce(
     (n, limit) => n + label(limit).length + 1 + `${Math.round(limit.percentUsed)}%`.length + CELL_GAP,
     0,
@@ -272,8 +315,9 @@ function fit(columns: number, limits: Limit[], percent: number, detail: string) 
   const base = 2 + usage + 'CTX'.length + 1 + 1 + `${percent}%`.length
   const withDetail = base + 2 + detail.length
   const withMeters = withDetail + limits.length * (METER_WIDTH + 1)
-  const showDetail = columns - withDetail >= BAR_MIN
-  const showMeters = showDetail && columns - withMeters >= METERS_BAR_MIN
+  // Without bars there is no context bar to keep room for, and no meters.
+  const showDetail = columns - withDetail >= (showBars ? BAR_MIN : 0)
+  const showMeters = showBars && showDetail && columns - withMeters >= METERS_BAR_MIN
   return { showDetail, showMeters }
 }
 

@@ -57,7 +57,9 @@ const BAND = {
 // How many times `part` appears in `s`.
 const count = (s: string, part: string) => s.split(part).length - 1
 
-const click = { type: 'up', x: 5, y: 0, button: 'left' } as const
+// A right click expands or collapses the band; a left click turns the bars on or off.
+const rightClick = { type: 'up', x: 5, y: 0, button: 'right' } as const
+const leftClick = { type: 'up', x: 5, y: 0, button: 'left' } as const
 
 type Boot = {
   // What $.session.surfaces() answers; [surface] by default, none for null.
@@ -126,7 +128,7 @@ async function start($, on, surface, rateLimits: unknown[], beneath?: string, st
 
 describe('context bar', () => {
   for (const surface of ['terminal', 'desktop'] as const) {
-    test(`${surface}: usage on top of context, a click collapses it to one row with usage first`, async ($, on) => {
+    test(`${surface}: usage on top of context, a right click collapses it to one row with usage first`, async ($, on) => {
       const { ui, band } = await start($, on, surface, RATE_LIMITS)
 
       const expanded = await band()
@@ -201,7 +203,7 @@ describe('context bar', () => {
       expect(expanded).not.toContain('compacts at')
       expect(expanded).not.toContain('buffer')
 
-      await ui.pointer(click)
+      await ui.pointer(rightClick)
       const collapsed = await band()
       expect(collapsed).not.toContain('borderStyle')
       // The table's typography: dim labels without colons, plain percentages
@@ -252,7 +254,7 @@ describe('context bar', () => {
       expect(order.every(i => i >= 0)).toBe(true)
       expect([...order].sort((a, b) => a - b)).toEqual(order)
 
-      await ui.pointer(click)
+      await ui.pointer(rightClick)
       expect(await band()).toContain('messages')
 
       const off = await $.command.run({ command: 'context-bar', args: '' } as never)
@@ -280,7 +282,7 @@ describe('context bar', () => {
       // One row per window, so a third and fourth still leave room for the countdowns.
       expect(expanded).toContain('2h 14m')
 
-      await ui.pointer(click)
+      await ui.pointer(rightClick)
       const collapsed = await band()
       const order = ['"5H"', '"WK"', '"FB"', '"88%"', '"mystery_window"', '"CTX"', '212k / 1M'].map(s =>
         collapsed.indexOf(s),
@@ -308,7 +310,7 @@ describe('context bar', () => {
 
       // Collapsed at 44 columns: labels, percentages and the context bar, with
       // no room for the detail; at 50 the detail is back and the meters still out.
-      await ui.pointer(click)
+      await ui.pointer(rightClick)
       const collapsed = await band()
       expect(collapsed).not.toContain('borderStyle')
       expect(collapsed).toContain('"62%"')
@@ -371,6 +373,87 @@ describe('context bar', () => {
       expect(expanded).not.toContain('"FB"')
     })
 
+    test(`${surface}: a left click turns the collapsed line's bars off and on; the table keeps them`, async ($, on) => {
+      const { ui, band } = await start($, on, surface, RATE_LIMITS)
+      const barLeaf = surface === 'desktop' ? '"height":"60%"' : '▄'
+
+      // On the expanded table a left click does nothing: it always has bars.
+      await ui.pointer(leftClick)
+      const expanded = await band()
+      expect(expanded).toContain('borderStyle')
+      expect(expanded).toContain(barLeaf)
+
+      await ui.pointer(rightClick)
+      expect(await band()).toContain(barLeaf)
+      await ui.pointer(leftClick)
+      const collapsed = await band()
+      expect(collapsed).not.toContain('borderStyle')
+      expect(collapsed).not.toContain(barLeaf)
+      expect(collapsed).toContain('"62%"')
+      expect(collapsed).toContain('"CTX"')
+      expect(collapsed).toContain('212k / 1M')
+
+      // Expanded again, the table still has its bars.
+      await ui.pointer(rightClick)
+      expect(await band()).toContain(barLeaf)
+      await ui.pointer(rightClick)
+      await ui.pointer(leftClick)
+      expect(await band()).toContain(barLeaf)
+    })
+
+    test(`${surface}: a new session keeps the collapsed line's bars off when they were turned off`, async ($, on) => {
+      const barLeaf = surface === 'desktop' ? '"height":"60%"' : '▄'
+      const { ui, band } = await start($, on, surface, RATE_LIMITS, undefined, { showBars: false, isCollapsed: true })
+      expect(await band()).not.toContain(barLeaf)
+      // Expanded, the table has its bars all the same.
+      await ui.pointer(rightClick)
+      expect(await band()).toContain(barLeaf)
+    })
+
+    test(`${surface}: resting the pointer on the collapsed line peeks at the expanded view`, async ($, on) => {
+      const { ui, band } = await start($, on, surface, RATE_LIMITS)
+      await ui.pointer(rightClick)
+      expect(await band()).not.toContain('borderStyle')
+
+      // A pointer passing over does not open it...
+      await ui.pointer({ type: 'enter', x: 5, y: 0 })
+      await ui.advance(300)
+      expect(await band()).not.toContain('borderStyle')
+      // ...one resting on it does, and leaving closes it again.
+      await ui.advance(300)
+      const peek = await band()
+      expect(peek).toContain('borderStyle')
+      expect(peek).toContain('2h 14m')
+      await ui.pointer({ type: 'leave', x: 5, y: 0 })
+      expect(await band()).not.toContain('borderStyle')
+
+      // The peek saved nothing: the band is still collapsed.
+      await ui.advance(1000)
+      expect(await band()).not.toContain('borderStyle')
+    })
+
+    test(`${surface}: a right click collapses the table even after the pointer rested on it`, async ($, on) => {
+      const { ui, band } = await start($, on, surface, RATE_LIMITS)
+      await ui.pointer({ type: 'enter', x: 5, y: 0 })
+      await ui.advance(600)
+      await ui.pointer(rightClick)
+      expect(await band()).not.toContain('borderStyle')
+    })
+
+    test(`${surface}: a left click during a peek leaves the collapsed line's bars alone`, async ($, on) => {
+      const { ui, band } = await start($, on, surface, RATE_LIMITS)
+      const barLeaf = surface === 'desktop' ? '"height":"60%"' : '▄'
+      await ui.pointer(rightClick)
+      await ui.pointer({ type: 'enter', x: 5, y: 0 })
+      await ui.advance(600)
+      expect(await band()).toContain('borderStyle')
+      await ui.pointer(leftClick)
+      await ui.pointer({ type: 'leave', x: 5, y: 0 })
+      const collapsed = await band()
+      expect(collapsed).not.toContain('borderStyle')
+      expect(collapsed).toContain(barLeaf)
+    })
+
     test(`${surface}: with no plan limits (an API key) only the context shows`, async ($, on) => {
       const { ui, band } = await start($, on, surface, [])
 
@@ -378,7 +461,7 @@ describe('context bar', () => {
       expect(expanded).not.toContain('"5H"')
       expect(expanded).toContain('"CTX"')
 
-      await ui.pointer(click)
+      await ui.pointer(rightClick)
       const collapsed = await band()
       expect(collapsed).not.toContain('5H')
       expect(collapsed).not.toContain('│')
@@ -519,8 +602,12 @@ describe('usage snapshot', () => {
     const { writes, clock } = await boot($, on, 'terminal', RATE_LIMITS, { statMtimeMs: NOW + 5_000 })
     await clock.advance(30_000)
     expect(writes.length).toBe(1)
-    // 180s on, that snapshot is 175s old, past the 150s it stays fresh.
-    await clock.advance(150_000)
+    // 120s on, that snapshot is 115s old, still fresh: this session stays quiet.
+    await clock.advance(90_000)
+    expect(writes.length).toBe(1)
+    // 150s on, it is 145s old, past the 120s it stays fresh: this one takes over,
+    // before a reader would call the file stale at 150s.
+    await clock.advance(30_000)
     expect(writes.length).toBe(2)
   })
 

@@ -8,12 +8,14 @@ Token Watch reaches the VS Code extension: `/context-bar` answers as text where 
 
 ### Added
 
+- **Clicks and hover, as in Token Watch for VS Code:** a right click expands or collapses the band; a left click on the collapsed line turns its bars on or off (the expanded table always keeps them); resting the pointer on the collapsed line for about half a second peeks at the expanded table until the pointer leaves. The bars choice is kept across sessions.
 - **`/context-bar` as text:** where nothing draws (the VS Code extension's chat panel, `claude -p`), `/context-bar` answers with the reading as one line, `5H 62% (2h 14m) · WK 31% (3d 4h) · CTX 21% (212k / 1M)`, instead of toggling a band nobody would see. `/context-bar text` asks for that line anywhere.
 - **Usage snapshot:** after each reading, Token Watch writes `~/.claude/token-watch/usage.json` (schema 1): the usage windows with their labels and reset times, the context total, window, auto-compact point and categories, the session's id and directory, and a timestamp. It is written again every 30 seconds while the session is alive, so a reader can tell a live session from one that ended; with several sessions open, the most recently active one keeps the file. On by default; the plugin's **Usage snapshot file** option (`/config`) turns it off. `/context-bar file` shows the path and the last write.
 - **Companion:** [Token Watch for VS Code](https://github.com/nevermemo/token-watch-vscode) shows the snapshot in the status bar, with a tooltip and a panel that draws the same bars.
 
 ### Changed
 
+- A left click no longer collapses the band; a right click does.
 - The band's formatting (window names and order, countdowns, token counts, level colours) moved to `hooks/format.ts`, shared by the band, the text reply and the snapshot.
 - Readings are taken after each turn even while the band is hidden, so the snapshot stays current.
 - The README's privacy section now lists the one file the mod writes and the two environment variables it reads.

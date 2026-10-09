@@ -1,8 +1,9 @@
 // Token Watch: plan usage (the 5-hour and weekly windows, and any other
 // window Claude Code reports) and the context window as thin bars above the
-// prompt, one colour per category the way /context breaks it down. A click
-// anywhere on the band collapses it to one row; /context-bar shows or hides
-// it.
+// prompt, one colour per category the way /context breaks it down. A right
+// click on the band expands or collapses it, a left click on the collapsed
+// line turns its bars on or off, and resting the pointer on the collapsed line peeks at the
+// expanded view; /context-bar shows or hides it.
 //
 // session.start: register /context-bar, restore the saved choices and the last
 //   usage windows seen (a new session has none until its first response),
@@ -16,7 +17,8 @@
 //   anywhere, `file` for the snapshot's path.
 // ui.render (AbovePrompt): the band, drawn by the Client in ./band.tsx, which
 //   lays itself out to the room it is given and reports clicks.
-// ui.message: the band was clicked; flip collapsed.
+// ui.message: the band was clicked: { action: 'collapse' } (right click)
+//   flips collapsed, { action: 'bars' } (left click) flips the bars.
 //
 // A reading is $.session.usage({ breakdown: 'summary' }): the /context rows,
 // estimated locally, so it costs no token-count request, and the plan's
@@ -34,6 +36,7 @@ import { label, readingLine, sorted } from './format'
 const reading = atom({ plugin: 'token-watch', key: 'reading' } as const, null)
 const isShown = atom({ plugin: 'token-watch', key: 'isShown' } as const, true)
 const isCollapsed = atom({ plugin: 'token-watch', key: 'isCollapsed' } as const, false)
+const showBars = atom({ plugin: 'token-watch', key: 'showBars' } as const, true)
 const limits = atom({ plugin: 'token-watch', key: 'limits' } as const, [])
 const nowMs = atom({ plugin: 'token-watch', key: 'nowMs' } as const, 0)
 
@@ -60,7 +63,7 @@ const COLORS: Record<string, string> = {
 // session's snapshot stays its own before this session takes the file over.
 const SNAPSHOT_PARTS = ['.claude', 'token-watch', 'usage.json']
 const HEARTBEAT_MS = 30_000
-const SNAPSHOT_FRESH_MS = 150_000
+const SNAPSHOT_FRESH_MS = 120_000
 
 // Snapshot bookkeeping. Module variables: a hot reload loses them, which
 // costs one extra write.
@@ -83,8 +86,10 @@ export const register: Register = (on, options) => {
     })
     const shown = await $.store.get('isShown')
     const collapsed = await $.store.get('isCollapsed')
+    const bars = await $.store.get('showBars')
     await update($, isShown, () => shown !== false)
     await update($, isCollapsed, () => collapsed === true)
+    await update($, showBars, () => bars !== false)
     await tick($)
     // A new session has no usage windows until its first response, so start
     // from the last ones seen; any whose reset time has passed is drawn at 0%,
@@ -146,14 +151,21 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.message', async ($, e, next) => {
-    if ((e.data as { toggle?: boolean } | null)?.toggle !== true) {
-      return next(e)
+    const action = (e.data as { action?: string } | null)?.action
+    if (action === 'collapse') {
+      const collapsed = !(await read($, isCollapsed))
+      await update($, isCollapsed, () => collapsed)
+      await $.store.set('isCollapsed', collapsed)
+      return {}
     }
-    const collapsed = !(await read($, isCollapsed))
-    await update($, isCollapsed, () => collapsed)
-    await $.store.set('isCollapsed', collapsed)
+    if (action === 'bars') {
+      const bars = !(await read($, showBars))
+      await update($, showBars, () => bars)
+      await $.store.set('showBars', bars)
+      return {}
+    }
 
-    return {}
+    return next(e)
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
@@ -172,6 +184,7 @@ export const register: Register = (on, options) => {
       limits: current(await read($, limits), clock),
       nowMs: clock,
       isCollapsed: await read($, isCollapsed),
+      showBars: await read($, showBars),
       surface: e.surface,
     }
 

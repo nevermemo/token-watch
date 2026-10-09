@@ -50,6 +50,9 @@ export type BandProps = {
   limits: Limit[]
   nowMs: number
   isCollapsed: boolean
+  // Whether the collapsed line draws its bars; without them, its labels,
+  // percentages and detail alone. The expanded table always has them.
+  showBars: boolean
   surface: 'terminal' | 'desktop' | 'mobile' | 'vscode'
 }
 
@@ -61,6 +64,7 @@ declare module 'claude-code' {
       nowMs: number
       isShown: boolean
       isCollapsed: boolean
+      showBars: boolean
     }
   }
 }

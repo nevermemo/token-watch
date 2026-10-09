@@ -8,7 +8,7 @@
     {
       "name": "token-watch",
       "source": ".",
-      "description": "Plan usage (5-hour, weekly and any model window) and the context window as thin bars above the prompt. Click to collapse to one line; /context-bar to hide."
+      "description": "Plan usage (5-hour, weekly and any model window) and the context window as thin bars above the prompt. Right-click to collapse to one line; /context-bar to hide, or to read it as text where nothing draws."
     }
   ]
 }
