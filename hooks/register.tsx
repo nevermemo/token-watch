@@ -2,8 +2,7 @@
 // window Claude Code reports) and the context window as thin bars above the
 // prompt, one colour per category the way /context breaks it down. A right
 // click on the band expands or collapses it, a left click on the collapsed
-// line turns its bars on or off, and resting the pointer on the collapsed line peeks at the
-// expanded view; /context-bar shows or hides it.
+// line turns its bars on or off, and /context-bar shows or hides it.
 //
 // session.start: register /context-bar, restore the saved choices and the last
 //   usage windows seen (a new session has none until its first response),

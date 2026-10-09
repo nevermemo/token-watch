@@ -410,50 +410,6 @@ describe('context bar', () => {
       expect(await band()).toContain(barLeaf)
     })
 
-    test(`${surface}: resting the pointer on the collapsed line peeks at the expanded view`, async ($, on) => {
-      const { ui, band } = await start($, on, surface, RATE_LIMITS)
-      await ui.pointer(rightClick)
-      expect(await band()).not.toContain('borderStyle')
-
-      // A pointer passing over does not open it...
-      await ui.pointer({ type: 'enter', x: 5, y: 0 })
-      await ui.advance(300)
-      expect(await band()).not.toContain('borderStyle')
-      // ...one resting on it does, and leaving closes it again.
-      await ui.advance(300)
-      const peek = await band()
-      expect(peek).toContain('borderStyle')
-      expect(peek).toContain('2h 14m')
-      await ui.pointer({ type: 'leave', x: 5, y: 0 })
-      expect(await band()).not.toContain('borderStyle')
-
-      // The peek saved nothing: the band is still collapsed.
-      await ui.advance(1000)
-      expect(await band()).not.toContain('borderStyle')
-    })
-
-    test(`${surface}: a right click collapses the table even after the pointer rested on it`, async ($, on) => {
-      const { ui, band } = await start($, on, surface, RATE_LIMITS)
-      await ui.pointer({ type: 'enter', x: 5, y: 0 })
-      await ui.advance(600)
-      await ui.pointer(rightClick)
-      expect(await band()).not.toContain('borderStyle')
-    })
-
-    test(`${surface}: a left click during a peek leaves the collapsed line's bars alone`, async ($, on) => {
-      const { ui, band } = await start($, on, surface, RATE_LIMITS)
-      const barLeaf = surface === 'desktop' ? '"height":"60%"' : '▄'
-      await ui.pointer(rightClick)
-      await ui.pointer({ type: 'enter', x: 5, y: 0 })
-      await ui.advance(600)
-      expect(await band()).toContain('borderStyle')
-      await ui.pointer(leftClick)
-      await ui.pointer({ type: 'leave', x: 5, y: 0 })
-      const collapsed = await band()
-      expect(collapsed).not.toContain('borderStyle')
-      expect(collapsed).toContain(barLeaf)
-    })
-
     test(`${surface}: with no plan limits (an API key) only the context shows`, async ($, on) => {
       const { ui, band } = await start($, on, surface, [])
 

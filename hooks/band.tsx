@@ -36,23 +36,15 @@
 // - left click on the collapsed line: its bars on or off; posts
 //   { action: 'bars' }. On the expanded table it does nothing.
 // - right click: expand or collapse; posts { action: 'collapse' }.
-// - hover: resting on the collapsed line for PEEK_MS shows the expanded view
-//   until the pointer leaves, a peek that changes nothing saved.
+// - hover: the labels brighten while the pointer is over the band.
 
 import type { ClientModule } from 'claude-code'
 
 import type { BandProps, Limit, Reading } from '../types'
 import { countdown, label, levelColor, short, sorted } from './format'
 
-// Local state: whether the pointer is over the band, how many hover ticks it
-// has rested there, and whether that has opened a peek.
-type Local = { isHovered: boolean; hoverTicks: number; isPeeking: boolean }
-
-// The hover peek: a tick every HOVER_TICK_MS, and the peek opens after
-// PEEK_TICKS of them (about half a second), so a pointer passing over on its
-// way to the prompt does not make the band jump.
-const HOVER_TICK_MS = 150
-const PEEK_TICKS = 3
+// Local state: whether the pointer is over the band.
+type Local = { isHovered: boolean }
 
 type Row = { label: string; bar: unknown[]; percent: number; detail: string }
 
@@ -94,44 +86,23 @@ const METERS_BAR_MIN = 20
 
 const Band: ClientModule<BandProps, Local> = (props, surface) => {
   const { Box, Text } = surface.elements
-  const { reading: now, nowMs, showBars } = props
+  const { reading: now, nowMs, showBars, isCollapsed } = props
   const limits = sorted(props.limits)
-  const local: Local = surface.state ?? { isHovered: false, hoverTicks: 0, isPeeking: false }
-  const { isHovered } = local
-
-  // Once per instance: the hover clock. It redraws only while the pointer
-  // rests on the band, until the peek opens.
-  if (surface.state === undefined) {
-    surface.every(HOVER_TICK_MS, () => {
-      const state = surface.state
-      if (!state?.isHovered || state.isPeeking) return
-      const hoverTicks = state.hoverTicks + 1
-      surface.setState({ ...state, hoverTicks, isPeeking: hoverTicks >= PEEK_TICKS })
-    })
-    surface.setState(local)
-  }
+  const isHovered = surface.state?.isHovered ?? false
 
   surface.onPointer(event => {
-    // Read the state as it is now, not as it was when this render ran: an
-    // enter and a leave can both arrive before the next frame.
-    const state = surface.state ?? local
     if (event.type === 'up' && event.button === 'left') {
-      // A peek shows the expanded table, and a left click on it does nothing.
-      if (props.isCollapsed && !state.isPeeking) surface.post({ action: 'bars' })
+      // The expanded table always has its bars, so a left click on it does nothing.
+      if (isCollapsed) surface.post({ action: 'bars' })
     } else if (event.type === 'up' && event.button === 'right') {
-      // A click ends any peek and restarts the hover clock, so the new state
-      // is what shows next.
-      surface.setState({ ...state, hoverTicks: 0, isPeeking: false })
       surface.post({ action: 'collapse' })
-    } else if (event.type === 'enter') {
-      surface.setState({ isHovered: true, hoverTicks: 0, isPeeking: false })
-    } else if (event.type === 'leave') {
-      surface.setState({ isHovered: false, hoverTicks: 0, isPeeking: false })
+    } else if (event.type === 'enter' || event.type === 'leave') {
+      // Read the state as it is now: an enter and a leave can both arrive
+      // before the next frame.
+      const hovered = event.type === 'enter'
+      if ((surface.state?.isHovered ?? false) !== hovered) surface.setState({ isHovered: hovered })
     }
   })
-
-  // A peek shows the expanded view over a collapsed band.
-  const isCollapsed = props.isCollapsed && !local.isPeeking
 
   const percent = Math.round((now.total / now.window) * 100)
 

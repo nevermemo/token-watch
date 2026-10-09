@@ -45,7 +45,6 @@ In the real band each bar is filled in proportion and coloured: a coloured fill 
 
 - **Right-click the band** to collapse it to one line, or to expand it again.
 - **Left-click the collapsed line** to turn its bars off or on: `5H 62%   WK 31%   CTX 21%  212k / 1M`. The expanded table always keeps its bars.
-- **Rest the pointer on the collapsed line** for about half a second to peek at the expanded table. It folds back when the pointer leaves, and nothing is saved.
 - **`/context-bar`** hides or shows the band. Where the band can't be drawn (the VS Code extension's chat panel, `claude -p`), it answers with the reading as one line instead: `5H 62% (2h 14m) · WK 31% (3d 4h) · CTX 21% (212k / 1M)`.
 - **`/context-bar text`** answers with that line anywhere.
 - **`/context-bar file`** says where the usage snapshot is and when it was last written.
@@ -195,7 +194,7 @@ The snapshot file is described [above](#the-usage-snapshot).
 | `session.start` | Registers `/context-bar`, restores the saved choices and the last usage seen, takes a first reading, and ticks a clock every 30 seconds for the countdowns. On the same tick it refreshes the usage snapshot while this session is the one that wrote it last. |
 | `session.measure` | Takes a new reading after each turn, and whenever a usage window changes, band shown or not, and writes the snapshot when the figures changed. |
 | `command.run` (`context-bar`) | Shows or hides the band where it draws; answers with the reading as text where nothing draws, with `text`, or with the snapshot's path with `file`. |
-| `ui.render` (`AbovePrompt`) | Draws the band as a client module ([`hooks/band.tsx`](hooks/band.tsx)). The band lays itself out to the available width, reports clicks, and opens the hover peek itself. Other mods drawing above the prompt keep their place; Token Watch adds its band beneath theirs. |
+| `ui.render` (`AbovePrompt`) | Draws the band as a client module ([`hooks/band.tsx`](hooks/band.tsx)). The band lays itself out to the available width and reports clicks. Other mods drawing above the prompt keep their place; Token Watch adds its band beneath theirs. |
 | `ui.message` | Receives the clicks: a right click flips between expanded and collapsed, a left click on the collapsed line turns its bars on or off. |
 
 **Bars on each surface:** on the desktop app, bars are boxes 60% of the line's height. In a terminal they are `▄` blocks. Both are thinner than the line, so stacked bars keep a gap between them.
@@ -208,7 +207,7 @@ token-watch/
 ├── .claude-plugin/marketplace.json   lists this repository as its own marketplace
 ├── hooks/hooks.json                  points Claude Code at register.tsx
 ├── hooks/register.tsx                hooks, readings and saved state
-├── hooks/band.tsx                    the band: layout, bars, legend, clicks, hover
+├── hooks/band.tsx                    the band: layout, bars, legend, clicks
 ├── hooks/format.ts                   names, order, countdowns and token counts, shared by the band, the text reply and the snapshot
 ├── types/index.d.ts                  shared types and state declarations
 ├── tests/context-bar.test.tsx        tests for the terminal and desktop surfaces
