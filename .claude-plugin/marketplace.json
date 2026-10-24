@@ -8,7 +8,7 @@
     {
       "name": "token-watch",
       "source": ".",
-      "description": "Plan usage (5-hour, weekly and any model window) and the context window as thin bars above the prompt. Right-click to collapse to one line; /context-bar to hide, or to read it as text where nothing draws."
+      "description": "Plan usage (5-hour, weekly and any model window), the context window and the prompt cache's countdown as thin bars above the prompt. Right-click to cycle its views; click the timer to keep the cache warm; /context-bar to hide, or to read it as text where nothing draws."
     }
   ]
 }

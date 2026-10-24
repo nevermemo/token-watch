@@ -1,23 +1,33 @@
 // Token Watch: plan usage (the 5-hour and weekly windows, and any other
-// window Claude Code reports) and the context window as thin bars above the
-// prompt, one colour per category the way /context breaks it down. A right
-// click on the band expands or collapses it, a left click on the collapsed
-// line turns its bars on or off, and /context-bar shows or hides it.
+// window Claude Code reports), the context window and the prompt cache's
+// countdown as thin bars above the prompt. A right click cycles the band's
+// three views, the cache timer and the Keep warm button turn keep-warm on and
+// off, and /context-bar shows or hides it.
 //
-// session.start: register /context-bar, restore the saved choices and the last
-//   usage windows seen (a new session has none until its first response),
-//   take a reading, and tick a clock every 30s so the reset countdowns stay
-//   current and the usage snapshot says the session is alive.
+// session.start: register /context-bar, restore the saved view (or the one
+//   the 1.1 keys meant) and the last usage windows seen (a new session has
+//   none until its first response), read the TTL controls once (three
+//   environment variables; the promptCacheTtl, idleCompaction and
+//   autoCompactEnabled settings), take a reading, and tick a clock every 30s
+//   so the countdowns stay current and the usage snapshot says the session
+//   is alive.
 // session.measure: after each main-thread turn, or when a usage window moves,
 //   take a reading.
+// turn.start / turn.complete (main loop): no ping while a turn runs; when a
+//   response ends the countdown restarts, since its request refreshed the
+//   cache. Neither hook reads the text.
+// prompt.submit: a prompt from the person turns keep-warm off; a background
+//   delivery does not. Only the origin is read, and the prompt passes on.
+// session.compact (main loop): keep-warm off, the countdown restarts.
+// session.end (clear): the cache is forgotten; keep-warm off.
 // command.run (context-bar): show or hide the band where it draws; where it
 //   cannot be drawn (the VS Code extension's chat panel, a headless run),
 //   answer with the reading as one line of text. `text` asks for that line
 //   anywhere, `file` for the snapshot's path.
 // ui.render (AbovePrompt): the band, drawn by the Client in ./band.tsx, which
 //   lays itself out to the room it is given and reports clicks.
-// ui.message: the band was clicked: { action: 'collapse' } (right click)
-//   flips collapsed, { action: 'bars' } (left click) flips the bars.
+// ui.message: the band was clicked: { action: 'cycle' } (right click) moves
+//   to the next view, { action: 'keep-warm' } (either button) toggles it.
 //
 // A reading is $.session.usage({ breakdown: 'summary' }): the /context rows,
 // estimated locally, so it costs no token-count request, and the plan's
@@ -25,19 +35,47 @@
 // Each reading is also written to ~/.claude/token-watch/usage.json, the
 // snapshot a companion (Token Watch for VS Code) reads; the plugin's
 // `snapshot` option turns that off.
+//
+// Keep-warm: a ping is $.model.fork with a one-word prompt, which repeats the
+// main thread's last request so the API serves it from the cache and
+// refreshes the entry. Pings go out a lead time before the believed expiry,
+// never during a turn, and stop at the caps, when the person types, after
+// two failures in a row, when a ping finds the cache cold, at compaction and
+// at /clear. The rules are in ./cache.ts.
 
 import { atom, read, update } from 'claude-code'
-import type { Register } from 'claude-code'
+import type { Register, Timer } from 'claude-code'
 
-import type { BandProps, Limit, Reading, Slice, Snapshot } from '../types'
-import { label, readingLine, sorted } from './format'
+import type { BandProps, Limit, Reading, Slice, Snapshot, TtlInputs, View } from '../types'
+import {
+  BACKGROUND_ORIGINS,
+  COLD_READ_SHARE,
+  KEEP_WARM_OFF,
+  MAX_FAILURES,
+  MIN_WARM_READ,
+  NO_CACHE,
+  NO_INPUTS,
+  PING_PROMPT,
+  RETRY_MS,
+  TTL_MS,
+  caps,
+  isTtl,
+  leadMs,
+  nextView,
+  refreshMs,
+  resolveTtl,
+} from './cache'
+import { hmm, label, readingLine, short, sorted } from './format'
 
 const reading = atom({ plugin: 'token-watch', key: 'reading' } as const, null)
 const isShown = atom({ plugin: 'token-watch', key: 'isShown' } as const, true)
-const isCollapsed = atom({ plugin: 'token-watch', key: 'isCollapsed' } as const, false)
-const showBars = atom({ plugin: 'token-watch', key: 'showBars' } as const, true)
+const view = atom({ plugin: 'token-watch', key: 'view' } as const, 'expanded')
 const limits = atom({ plugin: 'token-watch', key: 'limits' } as const, [])
 const nowMs = atom({ plugin: 'token-watch', key: 'nowMs' } as const, 0)
+const working = atom({ plugin: 'token-watch', key: 'working' } as const, false)
+const ttlInputs = atom({ plugin: 'token-watch', key: 'ttlInputs' } as const, NO_INPUTS)
+const cache = atom({ plugin: 'token-watch', key: 'cache' } as const, NO_CACHE)
+const keepWarm = atom({ plugin: 'token-watch', key: 'keepWarm' } as const, KEEP_WARM_OFF)
 
 // /context's row names, shortened for the legend.
 const LABELS: Record<string, string> = {
@@ -64,12 +102,17 @@ const SNAPSHOT_PARTS = ['.claude', 'token-watch', 'usage.json']
 const HEARTBEAT_MS = 30_000
 const SNAPSHOT_FRESH_MS = 120_000
 
-// Snapshot bookkeeping. Module variables: a hot reload loses them, which
-// costs one extra write.
+// The least a ping waits once armed.
+const MIN_PING_WAIT_MS = 1_000
+
+// Snapshot bookkeeping and the armed ping. Module variables: a hot reload
+// loses them, which costs one extra write, and the heartbeat arms the ping
+// again.
 let snapshotOn = true
 let snapshotPath: string | null = null
 let lastWriteMs = 0
 let lastKey = ''
+let pingTimer: Timer | null = null
 
 export const register: Register = (on, options) => {
   // The plugin's `snapshot` option (/config): on unless set to false.
@@ -80,15 +123,13 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'context-bar',
       description:
-        'Show or hide the Token Watch band (plan usage and context) above the prompt; "text" for the reading as a line, "file" for the usage snapshot',
+        'Show or hide the Token Watch band (plan usage, context and the prompt cache countdown) above the prompt; right-click it to cycle its views; "text" for the reading as a line, "file" for the usage snapshot',
       argumentHint: '[text|file]',
     })
     const shown = await $.store.get('isShown')
-    const collapsed = await $.store.get('isCollapsed')
-    const bars = await $.store.get('showBars')
     await update($, isShown, () => shown !== false)
-    await update($, isCollapsed, () => collapsed === true)
-    await update($, showBars, () => bars !== false)
+    const restored = await restoreView($)
+    await update($, view, () => restored)
     await tick($)
     // A new session has no usage windows until its first response, so start
     // from the last ones seen; any whose reset time has passed is drawn at 0%,
@@ -100,8 +141,13 @@ export const register: Register = (on, options) => {
     if (snapshotOn) {
       snapshotPath = await resolveSnapshotPath($)
     }
+    const inputs = await readTtlInputs($)
+    await update($, ttlInputs, () => inputs)
+    await settleTtl($)
     await takeReading($)
     $.clock.every(HEARTBEAT_MS, () => void tick($).then(() => heartbeat($)))
+    // The ping timer is a module variable a hot reload drops, while keep-warm's state lives in $.state.
+    if ((await read($, keepWarm)).on) await schedule($)
 
     return result
   })
@@ -114,6 +160,67 @@ export const register: Register = (on, options) => {
       await takeReading($)
     }
 
+    return result
+  })
+
+  on('turn.start', async ($, e, next) => {
+    const result = await next(e)
+    stopPingTimer()
+    await update($, working, () => true)
+    return result
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    const result = await next(e)
+    if (e.agentId) return result
+    await tick($)
+    await update($, working, () => false)
+    // A response came back, so its request was served: the cache was
+    // refreshed at that moment. An interrupted or failed turn without one
+    // leaves the countdown as it was.
+    if (e.usage) await rebase($)
+    await schedule($)
+    await writeSnapshot($)
+    return result
+  })
+
+  on('prompt.submit', async ($, e, next) => {
+    // The person is back: keep-warm has done its job. A delivery from a
+    // notification, a schedule, a peer or a plugin is not the person.
+    const kind = (e.origin as { kind?: string } | undefined)?.kind ?? ''
+    if (!BACKGROUND_ORIGINS.has(kind) && (await read($, keepWarm)).on) {
+      await stopKeepWarm($, null)
+    }
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('session.compact', async ($, e, next) => {
+    const result = await next(e)
+    // The conversation layer is replaced; the summarizer's request read the
+    // prefix, so the layers that stay are warm from now.
+    if (!e.agentId && result.skip === undefined) {
+      await tick($)
+      if ((await read($, keepWarm)).on) await stopKeepWarm($, 'stopped: compaction')
+      if ((await read($, cache)).lastResponseAt !== null) await rebase($)
+    }
+    return result
+  }).catch(($, e, next) => next(e))
+
+  on('session.end', async ($, e, next) => {
+    const result = await next(e)
+    if (e.reason === 'clear') {
+      stopPingTimer()
+      await update($, keepWarm, () => KEEP_WARM_OFF)
+      await update($, cache, c => ({
+        ...c,
+        lastResponseAt: null,
+        warmUntil: null,
+        windowMs: TTL_MS[c.ttl],
+        prefixTokens: null,
+        confirmed: false,
+      }))
+      await settleTtl($)
+    }
     return result
   })
 
@@ -135,7 +242,11 @@ export const register: Register = (on, options) => {
       await tick($)
       await takeReading($)
       const now = await read($, nowMs)
-      const text = readingLine(await read($, reading), current(await read($, limits), now), now)
+      const text = readingLine(await read($, reading), current(await read($, limits), now), now, {
+        cache: await read($, cache),
+        keepWarm: await read($, keepWarm),
+        isWorking: await read($, working),
+      })
       return { text: text || 'Token Watch: no reading yet.' }
     }
 
@@ -151,16 +262,14 @@ export const register: Register = (on, options) => {
 
   on('ui.message', async ($, e, next) => {
     const action = (e.data as { action?: string } | null)?.action
-    if (action === 'collapse') {
-      const collapsed = !(await read($, isCollapsed))
-      await update($, isCollapsed, () => collapsed)
-      await $.store.set('isCollapsed', collapsed)
+    if (action === 'cycle') {
+      const moved = nextView(await read($, view))
+      await update($, view, () => moved)
+      await $.store.set('view', moved)
       return {}
     }
-    if (action === 'bars') {
-      const bars = !(await read($, showBars))
-      await update($, showBars, () => bars)
-      await $.store.set('showBars', bars)
+    if (action === 'keep-warm') {
+      await toggleKeepWarm($)
       return {}
     }
 
@@ -182,8 +291,10 @@ export const register: Register = (on, options) => {
       reading: now,
       limits: current(await read($, limits), clock),
       nowMs: clock,
-      isCollapsed: await read($, isCollapsed),
-      showBars: await read($, showBars),
+      view: await read($, view),
+      isWorking: e.props.isWorking || (await read($, working)),
+      cache: await read($, cache),
+      keepWarm: await read($, keepWarm),
       surface: e.surface,
     }
 
@@ -232,11 +343,18 @@ async function takeReading($) {
         compactsAt: breakdown.isAutoCompactEnabled ? (breakdown.autoCompactThreshold ?? null) : null,
       }
       await update($, reading, () => next)
+      // The last response's prompt, what a warm ping reads most of.
+      const api = breakdown.apiUsage
+      if (api) {
+        const prefix = api.input_tokens + api.cache_read_input_tokens + api.cache_creation_input_tokens
+        await update($, cache, c => (c.prefixTokens === prefix ? c : { ...c, prefixTokens: prefix }))
+      }
     }
   } catch {
     // No reading this time; the band keeps the last one.
     return
   }
+  await settleTtl($)
   await writeSnapshot($)
 }
 
@@ -251,6 +369,195 @@ function current(windows: Limit[], nowMs: number) {
   return windows.map(w =>
     !w.resetsAt || !nowMs || Date.parse(w.resetsAt) > nowMs ? w : { kind: w.kind, percentUsed: 0 },
   )
+}
+
+// The saved view; or the one the 1.1 keys (isCollapsed, showBars) meant,
+// saved under `view` in their place.
+async function restoreView($): Promise<View> {
+  const saved = await $.store.get('view')
+  if (saved === 'expanded' || saved === 'bars' || saved === 'plain') return saved
+  const collapsed = await $.store.get('isCollapsed')
+  const bars = await $.store.get('showBars')
+  const migrated: View = collapsed === true ? (bars === false ? 'plain' : 'bars') : 'expanded'
+  if (collapsed !== undefined || bars !== undefined) {
+    await $.store.set('view', migrated)
+    await $.store.delete('isCollapsed')
+    await $.store.delete('showBars')
+  }
+  return migrated
+}
+
+// The TTL controls, read once: the three environment variables Claude Code
+// honours, and from the settings promptCacheTtl, and whether idle compaction
+// may run (idleCompaction and autoCompactEnabled not false). Nothing else of
+// the environment or the settings is read or kept.
+async function readTtlInputs($): Promise<TtlInputs> {
+  const inputs: TtlInputs = { ...NO_INPUTS }
+  try {
+    inputs.force5m = (await $.env.get('FORCE_PROMPT_CACHING_5M')) === '1'
+    const env = await $.env.get('CLAUDE_CODE_PROMPT_CACHE_TTL')
+    inputs.envTtl = isTtl(env) ? env : null
+    inputs.enable1h = (await $.env.get('ENABLE_PROMPT_CACHING_1H')) === '1'
+  } catch {
+    // The environment could not be read: the defaults stand.
+  }
+  try {
+    const settings = await $.settings.read()
+    const setting = settings.promptCacheTtl
+    inputs.settingTtl = isTtl(setting) ? setting : null
+    inputs.idleCompaction = settings.idleCompaction !== false && settings.autoCompactEnabled !== false
+  } catch {
+    // No settings: the defaults stand.
+  }
+  return inputs
+}
+
+// The TTL as the controls and the plan say it is now.
+async function settleTtl($) {
+  const inputs = await read($, ttlInputs)
+  const c = await read($, cache)
+  const now = await read($, nowMs)
+  const { ttl, ttlSource } = resolveTtl(inputs, current(await read($, limits), now), c.confirmed)
+  const idleCompaction = ttl === '1h' && inputs.idleCompaction
+  if (ttl !== c.ttl || ttlSource !== c.ttlSource || idleCompaction !== c.idleCompaction) {
+    await update($, cache, cc => ({ ...cc, ttl, ttlSource, idleCompaction }))
+  }
+}
+
+// A main-thread request was just served: the countdown restarts from now.
+async function rebase($) {
+  const now = await read($, nowMs)
+  await update($, cache, c => ({ ...c, lastResponseAt: now, warmUntil: now + TTL_MS[c.ttl], windowMs: TTL_MS[c.ttl] }))
+}
+
+// Either button: keep-warm on, when there is a warm cache to keep (or a turn
+// is making one), else off. Pressed with nothing warm to keep, a note says so.
+async function toggleKeepWarm($) {
+  await tick($)
+  const now = await read($, nowMs)
+  const k = await read($, keepWarm)
+  if (k.on) {
+    await stopKeepWarm($, null)
+  } else {
+    const c = await read($, cache)
+    const isWorking = await read($, working)
+    if (!isWorking && c.warmUntil === null) {
+      await update($, keepWarm, kw => ({ ...kw, note: { at: now, text: 'keep-warm: nothing cached yet' } }))
+    } else if (!isWorking && c.warmUntil !== null && now >= c.warmUntil) {
+      await update($, keepWarm, kw => ({ ...kw, note: { at: now, text: 'keep-warm: the cache is already cold' } }))
+    } else {
+      await update($, keepWarm, () => ({ ...KEEP_WARM_OFF, on: true, startedAt: now }))
+      await schedule($)
+    }
+  }
+  await writeSnapshot($)
+}
+
+// Keep-warm off, with a note the band shows for a minute when there is a
+// reason to give.
+async function stopKeepWarm($, text: string | null) {
+  stopPingTimer()
+  const now = await read($, nowMs)
+  await update($, keepWarm, k => ({ ...k, on: false, note: text === null ? null : { at: now, text } }))
+}
+
+function stopPingTimer() {
+  pingTimer?.cancel()
+  pingTimer = null
+}
+
+// Arms the next ping: a lead time before the believed expiry. Nothing is
+// armed while keep-warm is off, before the first response, while a turn runs
+// (its end arms it) or once the cache has gone cold (the heartbeat then
+// turns keep-warm off).
+async function schedule($) {
+  stopPingTimer()
+  const k = await read($, keepWarm)
+  const c = await read($, cache)
+  if (!k.on || c.warmUntil === null || (await read($, working))) return
+  const now = await $.clock.now()
+  if (now >= c.warmUntil) return
+  const wait = Math.max(MIN_PING_WAIT_MS, c.warmUntil - leadMs(c.windowMs) - now)
+  pingTimer = $.clock.after(wait, () => void ping($))
+}
+
+// One ping: the caps checked, the fork sent, its counts shown, the countdown
+// moved on and the next ping armed; or keep-warm stopped, saying why.
+async function ping($) {
+  pingTimer = null
+  const k = await read($, keepWarm)
+  const c = await read($, cache)
+  if (!k.on || c.warmUntil === null || (await read($, working))) return
+  await tick($)
+  const sentAt = await read($, nowMs)
+  if (sentAt >= c.warmUntil) return stopKeepWarm($, 'stopped: cache went cold')
+  const cap = caps(refreshMs(c.ttl))
+  if (k.pings >= cap.pings) return stopKeepWarm($, `stopped: ${cap.pings} pings`)
+  if (k.startedAt !== null && sentAt - k.startedAt >= cap.ms) return stopKeepWarm($, `stopped: ${hmm(cap.ms)} reached`)
+
+  let result
+  try {
+    result = await $.model.fork({ prompt: PING_PROMPT })
+  } catch (err) {
+    // A fork that throws is a failed ping like any other.
+    await tick($)
+    const failedAt = await read($, nowMs)
+    if (!(await read($, keepWarm)).on) return
+    await pingFailed($, k.failures, String(err).slice(0, 120), failedAt)
+    await writeSnapshot($)
+    return
+  }
+  await tick($)
+  const now = await read($, nowMs)
+  if (!(await read($, keepWarm)).on) return
+  if (result.isAnswered) {
+    const got = result.usage.cache_read_input_tokens
+    const wrote = result.usage.cache_creation_input_tokens
+    const isCold = c.prefixTokens === null ? got < MIN_WARM_READ : got < COLD_READ_SHARE * c.prefixTokens
+    await update($, keepWarm, kw => ({
+      ...kw,
+      pings: kw.pings + 1,
+      failures: 0,
+      lastPing: { at: sentAt, read: got, wrote },
+      note: { at: now, text: `ping read ${short(got)} · wrote ${short(wrote)}` },
+    }))
+    if (isCold) {
+      // The cache was already cold: the ping paid to re-cache the prefix, and
+      // the next one would too. Stop, and show the cache as cold.
+      await update($, cache, cc => ({ ...cc, warmUntil: sentAt }))
+      await stopKeepWarm($, 'stopped: cache was cold')
+    } else {
+      // The first ping since the response, more than five minutes after it,
+      // read the cache: that is the hour TTL at work.
+      const firstSinceResponse = k.lastPing === null || (c.lastResponseAt !== null && k.lastPing.at < c.lastResponseAt)
+      const confirmed =
+        c.confirmed ||
+        (c.ttl === '1h' && firstSinceResponse && c.lastResponseAt !== null && sentAt - c.lastResponseAt > TTL_MS['5m'] + 30_000)
+      const refresh = refreshMs(c.ttl)
+      await update($, cache, cc => ({
+        ...cc,
+        warmUntil: Math.max(cc.warmUntil ?? sentAt, sentAt + refresh),
+        windowMs: refresh,
+        confirmed,
+      }))
+      if (confirmed) await settleTtl($)
+      await schedule($)
+    }
+  } else if (result.reason === 'nothing-to-fork') {
+    await stopKeepWarm($, 'stopped: nothing cached yet')
+  } else {
+    await pingFailed($, k.failures, result.reason === 'api-error' ? result.error : result.reason, now)
+  }
+  await writeSnapshot($)
+}
+
+// A failed ping: counted, shown, and keep-warm stopped after MAX_FAILURES in a
+// row, else retried after RETRY_MS.
+async function pingFailed($, before: number, why: string, now: number) {
+  const failures = before + 1
+  await update($, keepWarm, kw => ({ ...kw, failures, note: { at: now, text: `ping failed: ${why}` } }))
+  if (failures >= MAX_FAILURES) await stopKeepWarm($, `stopped: ${MAX_FAILURES} pings failed`)
+  else pingTimer = $.clock.after(RETRY_MS, () => void ping($))
 }
 
 // Where the snapshot goes: ~/.claude/token-watch/usage.json, `~` being
@@ -277,9 +584,13 @@ async function writeSnapshot($, force = false) {
   try {
     const now = await $.clock.now()
     const latest = await read($, reading)
+    const c = await read($, cache)
+    const k = await read($, keepWarm)
+    const cap = caps(refreshMs(c.ttl))
+    const iso = (ms: number) => new Date(ms).toISOString()
     const snapshot: Snapshot = {
       schema: 1,
-      writtenAt: new Date(now).toISOString(),
+      writtenAt: iso(now),
       session: {
         id: await $.session.id().catch(() => null),
         cwd: await $.session.cwd().catch(() => null),
@@ -300,6 +611,20 @@ async function writeSnapshot($, force = false) {
               compactsAt: latest.compactsAt,
               categories: latest.slices,
             },
+      cache: {
+        ttl: c.ttl,
+        ttlSource: c.ttlSource,
+        expiresAt: c.warmUntil === null ? null : iso(c.warmUntil),
+        warm: c.warmUntil !== null && now < c.warmUntil,
+        keepWarm: {
+          on: k.on,
+          pings: k.pings,
+          maxPings: cap.pings,
+          startedAt: k.startedAt === null ? null : iso(k.startedAt),
+          maxMs: cap.ms,
+          lastPing: k.lastPing === null ? null : { at: iso(k.lastPing.at), read: k.lastPing.read, wrote: k.lastPing.wrote },
+        },
+      },
     }
     const key = JSON.stringify({ ...snapshot, writtenAt: '' })
     if (!force && key === lastKey && now - lastWriteMs < HEARTBEAT_MS) return
@@ -311,11 +636,25 @@ async function writeSnapshot($, force = false) {
   }
 }
 
-// Every HEARTBEAT_MS: write the snapshot again so its timestamp says this
-// session is alive, unless another session wrote it more recently and its
-// snapshot is still fresh. That session keeps the file while it is active;
-// this one takes over once its snapshot has gone stale.
+// Every HEARTBEAT_MS: keep-warm off once the cache has gone cold under it, or
+// the next ping armed if none is (a reload lost it); then write the snapshot
+// again so its timestamp says this session is alive, unless another session
+// wrote it more recently and its snapshot is still fresh. That session keeps
+// the file while it is active; this one takes over once its snapshot has
+// gone stale.
 async function heartbeat($) {
+  try {
+    const k = await read($, keepWarm)
+    const c = await read($, cache)
+    const now = await read($, nowMs)
+    if (k.on && c.warmUntil !== null && now >= c.warmUntil && !(await read($, working))) {
+      await stopKeepWarm($, 'stopped: cache went cold')
+    } else if (pingTimer === null) {
+      await schedule($)
+    }
+  } catch {
+    // Try again at the next tick.
+  }
   if (!snapshotPath) return
   try {
     const stat = await $.fs.stat(snapshotPath).catch(() => null)

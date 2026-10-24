@@ -2,7 +2,8 @@
 // spells its figures, so the band, the /context-bar reading and the usage
 // snapshot all say the same thing.
 
-import type { Limit, Reading } from '../types'
+import type { CacheState, KeepWarm, Limit, Reading } from '../types'
+import { TTL_MS, caps, refreshMs } from './cache'
 
 // Usage windows by kind, in the order they are shown; any other window the
 // API sends comes after them.
@@ -60,10 +61,49 @@ export function levelColor(percent: number) {
   return '#e06c6c'
 }
 
+// A countdown as minutes and seconds, rounded up: "47:12", "4:05", "0:59".
+export function mmss(ms: number) {
+  const seconds = Math.max(0, Math.ceil(ms / 1000))
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
+}
+
+// A span as hours and minutes, rounded down: "0:42", "2:00".
+export function hmm(ms: number) {
+  const minutes = Math.max(0, Math.floor(ms / 60_000))
+  return `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, '0')}`
+}
+
+// The cache timer's label: the whole TTL while a turn runs (its requests
+// refresh the cache), "--:--" before the first response, "cold" once the
+// countdown has run out, else the time left.
+export function cacheLabel(cache: CacheState, nowMs: number, isWorking: boolean) {
+  if (isWorking) return mmss(TTL_MS[cache.ttl])
+  if (cache.warmUntil === null) return '--:--'
+  if (nowMs >= cache.warmUntil) return 'cold'
+  return mmss(cache.warmUntil - nowMs)
+}
+
+// The TTL and where it comes from: "1h · subscription".
+export function ttlText(cache: CacheState) {
+  return `${cache.ttl} · ${cache.ttlSource}`
+}
+
+// Keep-warm's caps: pings sent of the most allowed, and time on of the most
+// allowed, "pings 3/30 · 0:42/2:00".
+export function capsText(keepWarm: KeepWarm, cache: CacheState, nowMs: number) {
+  const cap = caps(refreshMs(cache.ttl))
+  const elapsed = keepWarm.startedAt === null ? 0 : nowMs - keepWarm.startedAt
+  return `pings ${keepWarm.pings}/${cap.pings} · ${hmm(elapsed)}/${hmm(cap.ms)}`
+}
+
+// What the text reply knows of the cache beside the reading.
+export type CacheLine = { cache: CacheState; keepWarm: KeepWarm; isWorking: boolean }
+
 // The reading as one line of text, for where the band cannot be drawn:
-// "5H 62% (2h 14m) · WK 31% (3d 4h) · CTX 21% (212k / 1M)". Empty before
-// the first reading.
-export function readingLine(reading: Reading | null, limits: Limit[], nowMs: number) {
+// "5H 62% (2h 14m) · WK 31% (3d 4h) · CTX 21% (212k / 1M)", then once there
+// is a countdown, "· TTL 47:12 (1h · subscription)", with keep-warm's caps
+// and the last ping's counts while they apply. Empty before the first reading.
+export function readingLine(reading: Reading | null, limits: Limit[], nowMs: number, cacheLine?: CacheLine) {
   const parts = sorted(limits).map(limit => {
     const left = countdown(limit.resetsAt, nowMs)
     return `${label(limit)} ${Math.round(limit.percentUsed)}%${left ? ` (${left})` : ''}`
@@ -71,6 +111,15 @@ export function readingLine(reading: Reading | null, limits: Limit[], nowMs: num
   if (reading !== null) {
     const percent = Math.round((reading.total / reading.window) * 100)
     parts.push(`CTX ${percent}% (${short(reading.total)} / ${short(reading.window)})`)
+  }
+  if (cacheLine && (cacheLine.cache.warmUntil !== null || cacheLine.keepWarm.on)) {
+    const { cache, keepWarm, isWorking } = cacheLine
+    const extras = [ttlText(cache)]
+    if (keepWarm.on) extras.push(`keep-warm ${capsText(keepWarm, cache, nowMs)}`)
+    if (keepWarm.lastPing !== null) {
+      extras.push(`last ping read ${short(keepWarm.lastPing.read)} wrote ${short(keepWarm.lastPing.wrote)}`)
+    }
+    parts.push(`TTL ${cacheLabel(cache, nowMs, isWorking)} (${extras.join(', ')})`)
   }
   return parts.join(' · ')
 }

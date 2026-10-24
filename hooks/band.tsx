@@ -1,4 +1,5 @@
-// The band itself, drawn as a Client so the whole thing is one click target.
+// The band itself, drawn as a Client so the whole thing is one pointer target
+// and its two Buttons are its own.
 //
 // Every bar is a row of Boxes that grow in proportion to what they measure, so
 // the layout engine fits it to whatever width the band has, on the terminal
@@ -20,31 +21,52 @@
 //   columns, over a track in one quiet colour for what is still available.
 //   On the context bar the reserve past the auto-compact point is a darker
 //   shade than the free space before it. Pieces are pure proportion, with no
-//   one-cell minimum, so a bar's fill matches the printed percentage. Under
-//   CTX, the legend, largest category first, with 2-cell swatches, wrapping
-//   onto more lines when it does not fit.
-// Collapsed: one line in the table's language. Each usage window as label, a
-//   10-cell meter and percentage; then CTX as label, the context bar filling
-//   the rest, percentage and "212k / 1M". Counted in cells against the width:
-//   the meters are drawn only while the context bar keeps 20 cells, the
-//   detail only while it keeps 8, and below that the bar takes what is left,
-//   so the line never wraps.
-// Without bars (a left click on the collapsed line): the line's labels,
-//   percentages and detail alone. The expanded table always has its bars.
+//   one-cell minimum, so a bar's fill matches the printed percentage. Then the
+//   TTL row: the prompt cache's time to live as a bar that empties, the timer,
+//   a Keep warm Button, and a dim line: the TTL and where it comes from, then
+//   keep-warm's caps (or, for a minute, the last ping's counts or why
+//   keep-warm stopped; or that idle compaction is on). The caps go first as
+//   the band narrows, then the source. Under CTX, the legend, largest category
+//   first, with 2-cell swatches, wrapping onto more lines when it does not fit.
+// Collapsed with bars ('bars'): one line in the table's language. Each usage
+//   window as label, a 10-cell meter and percentage; then CTX as label, the
+//   context bar filling the rest, percentage and "212k / 1M"; then the timer.
+//   Counted in cells against the width: the meters are drawn only while the
+//   context bar keeps 20 cells, the detail only while it keeps 8, and below
+//   that the bar takes what is left, so the line never wraps.
+// Collapsed without bars ('plain'): the line's labels, percentages, detail
+//   and timer alone.
 //
-// The pointer, as in Token Watch for VS Code:
-// - left click on the collapsed line: its bars on or off; posts
-//   { action: 'bars' }. On the expanded table it does nothing.
-// - right click: expand or collapse; posts { action: 'collapse' }.
-// - hover: the labels brighten while the pointer is over the band.
+// The timer, the same unit in every view: a 2-cell swatch in keep-warm's
+// colour (green on, grey off, red once the cache has gone cold) and the
+// countdown as a plain Button, "47:12". It reads "--:--" before the first
+// response, the whole TTL while a turn runs, "cold" once the countdown has
+// run out. Pressing it, or Keep warm, posts { action: 'keep-warm' }. Between
+// the hooks module's clock readings (every 30 s) the countdown ticks on the
+// Client's frame clock.
+//
+// The pointer: a right click posts { action: 'cycle' }, which moves to the
+// next view; a left click does nothing but press a Button; hover brightens
+// the labels.
 
 import type { ClientModule } from 'claude-code'
 
 import type { BandProps, Limit, Reading } from '../types'
-import { countdown, label, levelColor, short, sorted } from './format'
+import { NOTE_MS, TTL_MS } from './cache'
+import { cacheLabel, capsText, countdown, label, levelColor, short, sorted, ttlText } from './format'
 
-// Local state: whether the pointer is over the band.
-type Local = { isHovered: boolean }
+// Local state: whether the pointer is over the band, and the frame clock's
+// milliseconds since the instance started (what the countdown ticks on).
+type Local = { isHovered: boolean; frameMs: number }
+const INITIAL: Local = { isHovered: false, frameMs: 0 }
+
+// The hooks module's clock reading when the frame clock was last anchored to
+// it, and the frame clock then: the display clock is props.nowMs plus the
+// frames since. The latest props, for the ticker. Module variables: the
+// instance is one per band and outlives its redraws, and nothing here needs
+// to survive a reload.
+let anchor: { nowMs: number; frameMs: number } | null = null
+let latest: BandProps | null = null
 
 type Row = { label: string; bar: unknown[]; percent: number; detail: string }
 
@@ -53,6 +75,11 @@ type Row = { label: string; bar: unknown[]; percent: number; detail: string }
 // auto-compact point a step darker.
 const TRACK = '#3d4250'
 const RESERVE = '#2e3139'
+
+// Keep-warm's colours: on, off, and a cache that has gone cold.
+const WARM_ON = '#7fd4a0'
+const WARM_OFF = '#6e7383'
+const WARM_COLD = '#e06c6c'
 
 // What a terminal draws a piece with: the lower half block, shorter than its
 // cell, and one every console font has (the finer ▆ is missing from Consolas
@@ -69,6 +96,11 @@ const LEGEND: Record<string, string> = {
 // Below this many columns the expanded table leaves out the detail column.
 const DETAIL_MIN_COLUMNS = 50
 
+// Below these many columns the TTL row leaves out its caps (or note), then
+// the TTL and its source.
+const CAPS_MIN_COLUMNS = 90
+const SOURCE_MIN_COLUMNS = 64
+
 // Cells of slack in each fixed column: the desktop draws text in a
 // proportional font, where "CTX" or "100%" can be wider than its characters.
 const SLACK = 2
@@ -84,32 +116,62 @@ const METER_WIDTH = 10
 const BAR_MIN = 8
 const METERS_BAR_MIN = 20
 
+// The timer on the collapsed line: its gap, the 2-cell swatch, a space and
+// "47:12".
+const TIMER_CELLS = CELL_GAP + 2 + 1 + 5
+
 const Band: ClientModule<BandProps, Local> = (props, surface) => {
-  const { Box, Text } = surface.elements
-  const { reading: now, nowMs, showBars, isCollapsed } = props
+  const { Box, Text, Button } = surface.elements
+  latest = props
+  if (surface.state === undefined) {
+    surface.setState(INITIAL)
+    // One ticker per instance, started on the first call: a redraw a second
+    // while there is a countdown to move.
+    surface.every(1000, () => {
+      if (latest === null || latest.cache.warmUntil === null || latest.isWorking) return
+      const s = surface.state ?? INITIAL
+      surface.setState({ ...s, frameMs: s.frameMs + 1000 })
+    })
+  }
+  const state = surface.state ?? INITIAL
+  if (anchor === null || anchor.nowMs !== props.nowMs) anchor = { nowMs: props.nowMs, frameMs: state.frameMs }
+  const now = props.nowMs + (state.frameMs - anchor.frameMs)
+  const { reading: current, view, isWorking, cache, keepWarm } = props
   const limits = sorted(props.limits)
-  const isHovered = surface.state?.isHovered ?? false
+  const isHovered = state.isHovered
 
   surface.onPointer(event => {
-    if (event.type === 'up' && event.button === 'left') {
-      // The expanded table always has its bars, so a left click on it does nothing.
-      if (isCollapsed) surface.post({ action: 'bars' })
-    } else if (event.type === 'up' && event.button === 'right') {
-      surface.post({ action: 'collapse' })
+    if (event.type === 'up' && event.button === 'right') {
+      surface.post({ action: 'cycle' })
     } else if (event.type === 'enter' || event.type === 'leave') {
       // Read the state as it is now: an enter and a leave can both arrive
       // before the next frame.
       const hovered = event.type === 'enter'
-      if ((surface.state?.isHovered ?? false) !== hovered) surface.setState({ isHovered: hovered })
+      const s = surface.state ?? INITIAL
+      if (s.isHovered !== hovered) surface.setState({ ...s, isHovered: hovered })
     }
   })
 
-  const percent = Math.round((now.total / now.window) * 100)
+  const percent = Math.round((current.total / current.window) * 100)
 
   const draw = pieces(Box, Text, props.surface, surface.columns)
 
-  if (isCollapsed) {
-    const detail = `${short(now.total)} / ${short(now.window)}`
+  const isCold = cache.warmUntil !== null && !isWorking && now >= cache.warmUntil
+  const warmColor = isCold ? WARM_COLD : keepWarm.on ? WARM_ON : WARM_OFF
+  const timer = (
+    <Box flexDirection="row" alignItems="center" columnGap={1} flexShrink={0}>
+      <Box width={2} height={1} flexDirection="row" alignItems="center" flexShrink={0}>
+        {draw(warmColor, { grow: 1 })}
+      </Box>
+      <Button key="cache-timer" plain dimColor={!keepWarm.on && !isCold} onPress={() => surface.post({ action: 'keep-warm' })}>
+        {cacheLabel(cache, now, isWorking)}
+      </Button>
+    </Box>
+  )
+
+  if (view !== 'expanded') {
+    const showBars = view === 'bars'
+    const detail = `${short(current.total)} / ${short(current.window)}`
     const { showDetail, showMeters } = fit(surface.columns, limits, percent, detail, showBars)
     return (
       <Box flexDirection="row" alignItems="center" columnGap={CELL_GAP} paddingX={1}>
@@ -126,7 +188,9 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
             <Text wrap="truncate" {...warning(limit.percentUsed)}>{`${Math.round(limit.percentUsed)}%`}</Text>
           </Box>
         ))}
-        <Box flexDirection="row" alignItems="center" columnGap={1} flexGrow={1}>
+        {/* With bars the context bar fills the line and the timer ends it;
+            without, the texts follow one another and the timer comes last. */}
+        <Box flexDirection="row" alignItems="center" columnGap={1} flexGrow={showBars ? 1 : 0}>
           {/* The label and percentage keep their width; the bar gives way. */}
           <Box flexShrink={0}>
             <Text dimColor={!isHovered} wrap="truncate">
@@ -135,7 +199,7 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
           </Box>
           {showBars && (
             <Box flexDirection="row" flexGrow={1} minWidth={4} height={1} alignItems="center">
-              {bar(draw, now, TRACK, RESERVE)}
+              {bar(draw, current, TRACK, RESERVE)}
             </Box>
           )}
           <Box flexShrink={0}>
@@ -149,6 +213,7 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
             </Box>
           )}
         </Box>
+        {timer}
       </Box>
     )
   }
@@ -158,25 +223,33 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
       label: label(limit),
       bar: meter(draw, limit.percentUsed),
       percent: limit.percentUsed,
-      detail: countdown(limit.resetsAt, nowMs),
+      detail: countdown(limit.resetsAt, nowMsOf(props)),
     })),
     {
       label: 'CTX',
-      bar: bar(draw, now, TRACK, RESERVE),
+      bar: bar(draw, current, TRACK, RESERVE),
       percent,
-      detail: `${short(now.total)} / ${short(now.window)}`,
+      detail: `${short(current.total)} / ${short(current.window)}`,
     },
   ]
   const labelWidth = Math.max(3, ...rows.map(row => row.label.length)) + SLACK
   const showDetail = surface.columns >= DETAIL_MIN_COLUMNS
   const detailWidth = Math.max(...rows.map(row => row.detail.length)) + SLACK
-  const legend = now.slices.filter(s => s.kind === 'used').sort((a, b) => b.tokens - a.tokens)
+  const legend = current.slices.filter(s => s.kind === 'used').sort((a, b) => b.tokens - a.tokens)
   // A legend swatch: a 2-cell bar, drawn the way the bars are.
   const swatch = (color: string) => (
     <Box width={2} height={1} flexDirection="row" alignItems="center" flexShrink={0}>
       {draw(color, { grow: 1 })}
     </Box>
   )
+  // The TTL row's bar: the time left of the TTL in keep-warm's colour over the
+  // track. Full while a turn runs; all track before the first response and
+  // once the cache has gone cold.
+  const left =
+    isWorking ? 1 : cache.warmUntil === null ? 0 : Math.max(0, Math.min(1, (cache.warmUntil - now) / TTL_MS[cache.ttl]))
+  const leftGrow = Math.round(left * 10_000)
+  const ttlBar = [draw(warmColor, { grow: leftGrow }), draw(TRACK, { grow: 10_000 - leftGrow })]
+  const trailing = ttlTrailing(props, now, surface.columns)
 
   return (
     <Box flexDirection="column" borderStyle="round" borderDimColor={!isHovered} paddingX={1}>
@@ -202,6 +275,31 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
           )}
         </Box>
       ))}
+      <Box flexDirection="row" alignItems="center" columnGap={2}>
+        <Box width={labelWidth} flexShrink={0}>
+          <Text dimColor wrap="truncate">
+            TTL
+          </Text>
+        </Box>
+        <Box flexDirection="row" flexGrow={1} minWidth={4} height={1} alignItems="center">
+          {ttlBar}
+        </Box>
+        {timer}
+        <Button
+          key="keep-warm"
+          {...(keepWarm.on ? { variant: 'primary' as const } : { dimColor: true })}
+          onPress={() => surface.post({ action: 'keep-warm' })}
+        >
+          Keep warm
+        </Button>
+        {trailing !== '' && (
+          <Box flexShrink={0}>
+            <Text dimColor wrap="truncate">
+              {trailing}
+            </Text>
+          </Box>
+        )}
+      </Box>
       <Box flexDirection="row" flexWrap="wrap" alignItems="center" columnGap={3} paddingLeft={labelWidth + 2}>
         {legend.map(slice => (
           <Box key={slice.label} flexDirection="row" alignItems="center" columnGap={1} flexShrink={0}>
@@ -215,6 +313,27 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
 }
 
 export default Band
+
+// The hooks module's clock, for the reset countdowns: those move by the
+// minute, so they follow its 30-second readings rather than the frame clock.
+function nowMsOf(props: BandProps) {
+  return props.nowMs
+}
+
+// The TTL row's dim text: the TTL and where it comes from, then one of: the
+// last ping's counts (or a stop reason) for a minute, keep-warm's caps, or a
+// note that idle compaction is on. The caps go first as the band narrows,
+// then the source.
+function ttlTrailing({ cache, keepWarm }: BandProps, now: number, columns: number) {
+  const parts: string[] = []
+  if (columns >= SOURCE_MIN_COLUMNS) parts.push(ttlText(cache))
+  if (columns >= CAPS_MIN_COLUMNS) {
+    if (keepWarm.note !== null && now - keepWarm.note.at < NOTE_MS) parts.push(keepWarm.note.text)
+    else if (keepWarm.on) parts.push(capsText(keepWarm, cache, now))
+    else if (cache.ttl === '1h' && cache.idleCompaction) parts.push('idle compaction on')
+  }
+  return parts.join(' · ')
+}
 
 // How a bar draws one piece: a colour over a share of the bar (`grow`) or a
 // fixed number of cells (`width`). No minimum size: the share is exact, so a
@@ -276,14 +395,14 @@ function meter(draw: Draw, percentUsed: number) {
 
 // Which of the collapsed line's extras fit: the detail, then the usage
 // meters. Counted in cells, the bar's room being what is left after the
-// padding, labels, percentages and gaps; the desktop's proportional text
-// measures a little wider, which the bar absorbs.
+// padding, labels, percentages, gaps and the timer; the desktop's
+// proportional text measures a little wider, which the bar absorbs.
 function fit(columns: number, limits: Limit[], percent: number, detail: string, showBars: boolean) {
   const usage = limits.reduce(
     (n, limit) => n + label(limit).length + 1 + `${Math.round(limit.percentUsed)}%`.length + CELL_GAP,
     0,
   )
-  const base = 2 + usage + 'CTX'.length + 1 + 1 + `${percent}%`.length
+  const base = 2 + usage + 'CTX'.length + 1 + 1 + `${percent}%`.length + TIMER_CELLS
   const withDetail = base + 2 + detail.length
   const withMeters = withDetail + limits.length * (METER_WIDTH + 1)
   // Without bars there is no context bar to keep room for, and no meters.

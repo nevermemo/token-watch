@@ -2,6 +2,25 @@
 
 All notable changes to Token Watch are listed here. The project follows [Semantic Versioning](https://semver.org/).
 
+## 1.2.0 (2026-10-25)
+
+The prompt cache gets a row: how long until the API forgets this conversation, and an opt-in keep-warm that refreshes it while you are away.
+
+### Added
+
+- **TTL row:** the prompt cache's time to live as a bar that empties, with a countdown (`47:12`) that starts over at the end of each response. `1h` on a Claude subscription within plan usage, `5m` with an API key, a cloud provider or usage credits, or whatever `FORCE_PROMPT_CACHING_5M`, `CLAUDE_CODE_PROMPT_CACHE_TTL`, the `promptCacheTtl` setting or `ENABLE_PROMPT_CACHING_1H` say; the row names which. Once the countdown runs out the timer reads `cold`. The collapsed views end with the same timer.
+- **Keep warm (opt-in, off by default, per session):** click the timer or the `Keep warm` button, and Token Watch sends a one-word request over the conversation shortly before the cache would expire (8 minutes before on the hour, 75 seconds before on five minutes), so the cache stays warm until you are back. Each ping is a real request against your plan usage, read at the cached rate; the row shows the last ping's counts and the caps (`pings 3/8 · 0:42/8:00`). It stops when you send a prompt, at the caps (8 pings or 8 hours on the hour, 30 pings or 2 hours on five minutes), after two failed pings, when a ping finds the cache already cold, at compaction and at `/clear`.
+- **Measured first:** before writing keep-warm, four headless runs checked that a ping keeps the cache warm: on a forced five-minute TTL, and on the hour, where a ping at 55 minutes kept the cache readable at 65.
+- **Snapshot:** schema 1 gains a `cache` object (`ttl`, `ttlSource`, `expiresAt`, `warm`, `keepWarm`).
+- **`/context-bar text`:** ends with `TTL 47:12 (1h · subscription)` once there is a countdown, with keep-warm's caps and the last ping while they apply.
+
+### Changed
+
+- **Right click cycles three views:** expanded, collapsed with bars, collapsed without bars. A left click no longer does anything but press a button. The saved view replaces the old collapsed and bars choices, which are read once and removed.
+- The collapsed line keeps 11 cells for the timer, so its detail and meters drop a little earlier as the window narrows.
+- The README's privacy section lists the new hooks and calls: keep-warm is the one thing Token Watch does that spends usage, and only while you have turned it on.
+- Requires Claude Code 2.1.288 or later: 1.2.0 uses mod API features present in 2.1.288 (`$.model.fork`, `$.settings.read`) and was tested on 2.1.309.
+
 ## 1.1.0 (2026-10-09)
 
 Token Watch reaches the VS Code extension: `/context-bar` answers as text where the band can't be drawn, and a usage snapshot file feeds the new companion, [Token Watch for VS Code](https://github.com/nevermemo/token-watch-vscode).
