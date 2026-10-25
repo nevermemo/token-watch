@@ -387,7 +387,7 @@ export const register: Register = (on, options) => {
     const plain = isTerminal || undefined
     const mark = (isOn: boolean) => (isTerminal ? `[${isOn ? '\u25cf' : '\u25cb'}]` : isOn ? '\u2611' : '\u2610')
     const choice = (isOn: boolean) => (isTerminal ? `[${isOn ? '\u25cf' : '\u25cb'}]` : isOn ? '\u25c9' : '\u25cb')
-    const label = (text: string) => (isTerminal ? `[${text}]` : text)
+    const bracketed = (text: string) => (isTerminal ? `[${text}]` : text)
     // The name column: the longest name and its colon, and on the desktop a
     // cell of slack for its proportional font.
     const nameWidth = Math.max(...PARTS.map(([, name]) => name.length)) + (isTerminal ? 1 : 2)
@@ -407,7 +407,7 @@ export const register: Register = (on, options) => {
     )
     const reset = (key: string, onPress: () => void) => (
       <Button key={key} plain={plain} dimColor onPress={onPress}>
-        {label('reset')}
+        {bracketed('reset')}
       </Button>
     )
     return (
@@ -475,9 +475,7 @@ export const register: Register = (on, options) => {
                 <Button key={`${which}-down`} plain={plain} dimColor={value <= min} onPress={() => void stepCaps($, which, -1)}>
                   {isTerminal ? '[-]' : '\u2212'}
                 </Button>
-                <Box width={3} flexShrink={0} justifyContent="flex-end">
-                  <Text>{String(value)}</Text>
-                </Box>
+                <Text>{String(value)}</Text>
                 <Button key={`${which}-up`} plain={plain} dimColor={value >= max} onPress={() => void stepCaps($, which, 1)}>
                   {isTerminal ? '[+]' : '+'}
                 </Button>
@@ -486,12 +484,16 @@ export const register: Register = (on, options) => {
               </Box>
             )
           })}
-          <Box flexDirection="row" columnGap={1}>
-            <Box width={capWidth} flexShrink={0} />
-            <Button key="caps-reset" plain={plain} onPress={() => void resetCaps($)}>
-              {label(isGlobal ? 'Defaults' : 'Use all sessions')}
-            </Button>
-          </Box>
+          {/* Every session's caps go back to the defaults; in this session's
+              scope each overridden cap has its own reset. */}
+          {isGlobal && (
+            <Box flexDirection="row" columnGap={1}>
+              <Box width={capWidth} flexShrink={0} />
+              <Button key="caps-reset" plain={plain} onPress={() => void resetCaps($)}>
+                {bracketed('Defaults')}
+              </Button>
+            </Box>
+          )}
         </Box>
         <Text dimColor wrap="wrap">
           {`Defaults: ${DEFAULT_CAPS[ttl].pings} pings or ${DEFAULT_CAPS[ttl].hours} hours. A running keep-warm already past a new cap stops. /context-bar settings opens this panel again.`}
@@ -832,15 +834,12 @@ async function resetCap($: EngineInterface, which: keyof CapSetting) {
   await applySettings($)
 }
 
-// The caps' second button: in every session's scope, the defaults; in this
-// session's, the global caps again.
+// Every session's caps back to the defaults (the Defaults button, drawn only
+// in every session's scope).
 async function resetCaps($: EngineInterface) {
-  if (await editsGlobal($)) {
-    await update($, globalCaps, () => DEFAULT_CAPS)
-    await $.store.set('caps', DEFAULT_CAPS)
-  } else {
-    await saveSession($, { ...(await read($, sessionSettings)), caps: {} })
-  }
+  if (!(await editsGlobal($))) return
+  await update($, globalCaps, () => DEFAULT_CAPS)
+  await $.store.set('caps', DEFAULT_CAPS)
   await applySettings($)
 }
 

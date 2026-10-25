@@ -1572,7 +1572,7 @@ describe('settings scopes', () => {
     expect(forks.length).toBe(0)
   })
 
-  test("caps in this session's scope: an override, a reset per cap, and \"Use all sessions\"", async ($, on) => {
+  test("caps in this session's scope: an override and a reset per cap; Defaults only in every session's", async ($, on) => {
     const { ui, band, saved } = await start($, on, 'terminal', RATE_LIMITS, undefined, undefined, FIVE_M)
     await turn($)
     const { pane, drawn } = await mountPanel($, 'terminal')
@@ -1585,10 +1585,12 @@ describe('settings scopes', () => {
     expect(await band()).toContain('Pings: 0/30')
     await pane.press({ key: 'hours-up' })
     expect(saved.get(SESSION_KEY)).toMatchObject({ caps: { '5m': { hours: 3 } } })
-    expect(await drawn()).toContain('"label":"[Use all sessions]"')
-    await pane.press({ key: 'caps-reset' })
+    expect(await drawn()).not.toContain('"key":"caps-reset"')
+    await pane.press({ key: 'reset-hours' })
     expect(saved.has(SESSION_KEY)).toBe(false)
     expect(await band()).toContain('Time: 00:00 / 2:00:00')
+    await pane.press({ key: 'scope-global' })
+    expect(await drawn()).toContain('"key":"caps-reset","label":"[Defaults]"')
   })
 
   test("a session's own settings are restored and kept fresh on start; ones left 30 days, or unreadable, are pruned", async ($, on) => {
