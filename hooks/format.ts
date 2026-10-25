@@ -90,6 +90,36 @@ export function ttlText(cache: CacheState) {
 
 // Keep-warm's caps: pings sent of the most allowed, and time on of the most
 // allowed, "pings 3/30 · 0:42/2:00".
+// A span as hours, minutes and seconds: "8:00:00", "0:42:05".
+export function hmmss(ms: number) {
+  const seconds = Math.max(0, Math.floor(ms / 1000))
+  const h = Math.floor(seconds / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  return `${h}:${String(m).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`
+}
+
+// A span as minutes and seconds under the hour, "00:26", "42:05", and as
+// hours, minutes and seconds from there, "1:02:03".
+export function clockText(ms: number) {
+  const seconds = Math.max(0, Math.floor(ms / 1000))
+  if (seconds >= 3600) return hmmss(ms)
+  return `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`
+}
+
+// The expanded TTL row's timer: the time left over the whole TTL, "52:50 /
+// 60:00", or "--:-- / 60:00" before the first response, "cold / 60:00" once
+// it has run out, the whole TTL over itself while a turn runs.
+export function timerText(cache: CacheState, nowMs: number, isWorking: boolean) {
+  return `${cacheLabel(cache, nowMs, isWorking)} / ${mmss(TTL_MS[cache.ttl])}`
+}
+
+// Keep-warm's caps on the expanded TTL row: "Pings: 0/8  Time: 00:26 / 8:00:00".
+export function capsLine(keepWarm: KeepWarm, cache: CacheState, nowMs: number) {
+  const cap = caps(refreshMs(cache.ttl))
+  const elapsed = keepWarm.startedAt === null ? 0 : nowMs - keepWarm.startedAt
+  return `Pings: ${keepWarm.pings}/${cap.pings}  Time: ${clockText(elapsed)} / ${hmmss(cap.ms)}`
+}
+
 export function capsText(keepWarm: KeepWarm, cache: CacheState, nowMs: number) {
   const cap = caps(refreshMs(cache.ttl))
   const elapsed = keepWarm.startedAt === null ? 0 : nowMs - keepWarm.startedAt

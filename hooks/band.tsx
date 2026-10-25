@@ -22,12 +22,12 @@
 //   On the context bar the reserve past the auto-compact point is a darker
 //   shade than the free space before it. Pieces are pure proportion, with no
 //   one-cell minimum, so a bar's fill matches the printed percentage. Then the
-//   TTL row: the prompt cache's time to live as a bar that empties, the timer,
-//   a Keep warm Button, and a dim line: the TTL and where it comes from, then
-//   keep-warm's caps (or, for a minute, the last ping's counts or why
-//   keep-warm stopped; or that idle compaction is on). The caps go first as
-//   the band narrows, then the source. Under CTX, the legend, largest category
-//   first, with 2-cell swatches, wrapping onto more lines when it does not fit.
+//   TTL row: the prompt cache's time left over its whole TTL, "52:50 /
+//   60:00", and a Keep warm Button; while keep-warm is on, its caps, "Pings:
+//   0/8  Time: 00:26 / 8:00:00", and a Refresh caps Button; for a minute after
+//   a ping or a stop, a dim note. The caps and the note go below 90 columns.
+//   Under CTX, the legend, largest category first, with 2-cell swatches,
+//   wrapping onto more lines when it does not fit.
 // Collapsed with bars ('bars'): one line in the table's language. Each usage
 //   window as label, a 10-cell meter and percentage; then CTX as label, the
 //   context bar filling the rest, percentage and "212k / 1M"; then the timer.
@@ -37,9 +37,9 @@
 // Collapsed without bars ('plain'): the line's labels, percentages, detail
 //   and timer alone.
 //
-// The timer, the same unit in every view: a 2-cell swatch in keep-warm's
-// colour (green on, grey off, red once the cache has gone cold) and the
-// countdown as a plain Button, "47:12". It reads "--:--" before the first
+// The collapsed views' timer: a 2-cell swatch in keep-warm's colour (green
+// on, grey off, red once the cache has gone cold) and the countdown as a
+// Button, "47:12". It reads "--:--" before the first
 // response, the whole TTL while a turn runs, "cold" once the countdown has
 // run out. Pressing it, or Keep warm, posts { action: 'keep-warm' }. Between
 // the hooks module's clock readings (every 30 s) the countdown ticks on the
@@ -52,8 +52,8 @@
 import type { ClientModule } from 'claude-code'
 
 import type { BandProps, Limit, Reading } from '../types'
-import { NOTE_MS, TTL_MS } from './cache'
-import { cacheLabel, capsText, countdown, label, levelColor, short, sorted, ttlText } from './format'
+import { NOTE_MS } from './cache'
+import { cacheLabel, capsLine, countdown, label, levelColor, short, sorted, timerText } from './format'
 
 // Local state: whether the pointer is over the band, and the frame clock's
 // milliseconds since the instance started (what the countdown ticks on).
@@ -74,6 +74,10 @@ type Row = { label: string; bar: unknown[]; percent: number; detail: string }
 // usage tracks, the context's free space), and the reserve past the
 // auto-compact point a step darker.
 const TRACK = '#3d4250'
+
+// The desktop's button chips: a grey one, and green while what it controls is on.
+const CHIP_OFF = '#4a5060'
+const CHIP_ON = '#2f7a4f'
 const RESERVE = '#2e3139'
 
 // Keep-warm's colours: on, off, and a cache that has gone cold.
@@ -96,10 +100,8 @@ const LEGEND: Record<string, string> = {
 // Below this many columns the expanded table leaves out the detail column.
 const DETAIL_MIN_COLUMNS = 50
 
-// Below these many columns the TTL row leaves out its caps (or note), then
-// the TTL and its source.
+// Below this many columns the TTL row leaves out keep-warm's caps and notes.
 const CAPS_MIN_COLUMNS = 90
-const SOURCE_MIN_COLUMNS = 64
 
 // Cells of slack in each fixed column: the desktop draws text in a
 // proportional font, where "CTX" or "100%" can be wider than its characters.
@@ -156,6 +158,23 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
 
   const draw = pieces(Box, Text, props.surface, surface.columns)
 
+  // A Button inside a Client draws as plain text on the desktop app (measured),
+  // so there each Button sits on a filled chip to read as a button: grey, or
+  // green while what it controls is on. A terminal already draws "[ label ]".
+  const chip = (key: string, text: string, isOn: boolean, action: string) => {
+    const button = (
+      <Button key={key} onPress={() => surface.post({ action })}>
+        {text}
+      </Button>
+    )
+    if (props.surface !== 'desktop') return button
+    return (
+      <Box key={`${key}-chip`} flexShrink={0} paddingX={1} backgroundColor={isOn ? CHIP_ON : CHIP_OFF}>
+        {button}
+      </Box>
+    )
+  }
+
   const isCold = cache.warmUntil !== null && !isWorking && now >= cache.warmUntil
   const warmColor = isCold ? WARM_COLD : keepWarm.on ? WARM_ON : WARM_OFF
   const timer = (
@@ -163,9 +182,7 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
       <Box width={2} height={1} flexDirection="row" alignItems="center" flexShrink={0}>
         {draw(warmColor, { grow: 1 })}
       </Box>
-      <Button key="cache-timer" plain dimColor={!keepWarm.on && !isCold} onPress={() => surface.post({ action: 'keep-warm' })}>
-        {cacheLabel(cache, now, isWorking)}
-      </Button>
+      {chip('cache-timer', cacheLabel(cache, now, isWorking), false, 'keep-warm')}
     </Box>
   )
 
@@ -242,14 +259,11 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
       {draw(color, { grow: 1 })}
     </Box>
   )
-  // The TTL row's bar: the time left of the TTL in keep-warm's colour over the
-  // track. Full while a turn runs; all track before the first response and
-  // once the cache has gone cold.
-  const left =
-    isWorking ? 1 : cache.warmUntil === null ? 0 : Math.max(0, Math.min(1, (cache.warmUntil - now) / TTL_MS[cache.ttl]))
-  const leftGrow = Math.round(left * 10_000)
-  const ttlBar = [draw(warmColor, { grow: leftGrow }), draw(TRACK, { grow: 10_000 - leftGrow })]
-  const trailing = ttlTrailing(props, now, surface.columns)
+  // While keep-warm is on, its caps follow, then a minute's note (a ping's
+  // counts, why it stopped) when there is one. Both go below CAPS_MIN_COLUMNS.
+  const showCaps = keepWarm.on && surface.columns >= CAPS_MIN_COLUMNS
+  const note =
+    surface.columns >= CAPS_MIN_COLUMNS && keepWarm.note !== null && now - keepWarm.note.at < NOTE_MS ? keepWarm.note.text : ''
 
   return (
     <Box flexDirection="column" borderStyle="round" borderDimColor={!isHovered} paddingX={1}>
@@ -281,21 +295,22 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
             TTL
           </Text>
         </Box>
-        <Box flexDirection="row" flexGrow={1} minWidth={4} height={1} alignItems="center">
-          {ttlBar}
+        <Box flexShrink={0}>
+          <Text {...(isCold ? { color: WARM_COLD } : {})}>{timerText(cache, now, isWorking)}</Text>
         </Box>
-        {timer}
-        <Button
-          key="keep-warm"
-          {...(keepWarm.on ? { variant: 'primary' as const } : { dimColor: true })}
-          onPress={() => surface.post({ action: 'keep-warm' })}
-        >
-          Keep warm
-        </Button>
-        {trailing !== '' && (
-          <Box flexShrink={0}>
+        {chip('keep-warm', 'Keep warm', keepWarm.on, 'keep-warm')}
+        {showCaps && (
+          <Box flexShrink={0} marginLeft={1}>
+            <Text dimColor>{capsLine(keepWarm, cache, now)}</Text>
+          </Box>
+        )}
+        {showCaps && (
+          chip('refresh-caps', 'Refresh caps', false, 'refresh-caps')
+        )}
+        {note !== '' && (
+          <Box flexShrink={1} minWidth={0}>
             <Text dimColor wrap="truncate">
-              {trailing}
+              {note}
             </Text>
           </Box>
         )}
@@ -318,21 +333,6 @@ export default Band
 // minute, so they follow its 30-second readings rather than the frame clock.
 function nowMsOf(props: BandProps) {
   return props.nowMs
-}
-
-// The TTL row's dim text: the TTL and where it comes from, then one of: the
-// last ping's counts (or a stop reason) for a minute, keep-warm's caps, or a
-// note that idle compaction is on. The caps go first as the band narrows,
-// then the source.
-function ttlTrailing({ cache, keepWarm }: BandProps, now: number, columns: number) {
-  const parts: string[] = []
-  if (columns >= SOURCE_MIN_COLUMNS) parts.push(ttlText(cache))
-  if (columns >= CAPS_MIN_COLUMNS) {
-    if (keepWarm.note !== null && now - keepWarm.note.at < NOTE_MS) parts.push(keepWarm.note.text)
-    else if (keepWarm.on) parts.push(capsText(keepWarm, cache, now))
-    else if (cache.ttl === '1h' && cache.idleCompaction) parts.push('idle compaction on')
-  }
-  return parts.join(' · ')
 }
 
 // How a bar draws one piece: a colour over a share of the bar (`grow`) or a

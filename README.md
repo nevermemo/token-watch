@@ -12,20 +12,26 @@ Expanded:
 │ WK   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄  31%  3d 4h    │
 │ CTX  ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄  21%  212k / 1M│
 │      ▄ messages 186k   ▄ tools 12k   ▄ memory 4.9k   ▄ skills 3k │
-│ TTL  ▄▄▄▄▄▄▄▄▄▄▄▄▄▄   ▄▄ 47:12  [ Keep warm ]  1h · subscription │
+│ TTL  52:50 / 60:00  [ Keep warm ]                                │
 ╰──────────────────────────────────────────────────────────────────╯
+```
+
+With keep-warm on, the TTL row adds its caps and a `Refresh caps` button (in a band at least 90 columns wide):
+
+```text
+TTL  52:50 / 60:00  [ Keep warm ]  Pings: 0/8  Time: 00:26 / 8:00:00  [ Refresh caps ]
 ```
 
 Collapsed:
 
 ```text
- 5H ▄▄▄▄▄▄▄▄▄▄ 62%   WK ▄▄▄▄▄▄▄▄▄▄ 31%   CTX ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄ 21%  212k / 1M   ▄▄ 47:12
+ 5H ▄▄▄▄▄▄▄▄▄▄ 62%   WK ▄▄▄▄▄▄▄▄▄▄ 31%   CTX ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄ 21%  212k / 1M   ▄▄ [ 47:12 ]
 ```
 
 Collapsed without bars:
 
 ```text
- 5H 62%   WK 31%   CTX 21%  212k / 1M   ▄▄ 47:12
+ 5H 62%   WK 31%   CTX 21%  212k / 1M   ▄▄ [ 47:12 ]
 ```
 
 In the real band each bar is filled in proportion and coloured: a coloured fill on a grey track for usage, and one colour per category for the context.
@@ -39,7 +45,7 @@ In the real band each bar is filled in proportion and coloured: a coloured fill 
 | `FB`, `OP`, `SN`, `HK` | A model's own allowance, if Claude Code reports one (Fable, Opus, Sonnet, Haiku) | Time until it resets |
 | `$$` | Your organization's spend limit, when Claude Code runs through a Claude gateway | Time until it resets |
 | `CTX` | The context window, broken down the way `/context` breaks it down | Tokens in use, e.g. `99k / 1M` |
-| `TTL` | The prompt cache's time to live: how long until the API forgets this conversation's cached prefix, counted from the end of Claude's last response | `47:12` as a button, then `Keep warm`, then where the TTL comes from, e.g. `1h · subscription` |
+| `TTL` | The prompt cache's time to live: how long until the API forgets this conversation's cached prefix, counted from the end of Claude's last response | The time left over the whole TTL, e.g. `52:50 / 60:00`, then a `Keep warm` button. While keep-warm is on: its caps (`Pings: 0/8  Time: 00:26 / 8:00:00`) and a `Refresh caps` button, and for a minute after a ping or a stop, a dim note. The caps and the note need a band at least 90 columns wide |
 
 - **The context bar:** has one coloured piece per category (messages, tools, MCP tools, skills, memory files and so on), largest first. A legend under the bar names each colour.
   - The light grey track is free space.
@@ -52,7 +58,9 @@ In the real band each bar is filled in proportion and coloured: a coloured fill 
 ## Using it
 
 - **Right-click the band** to cycle its views: the table, one line with bars, one line without.
-- **Click the timer (`47:12`) or `Keep warm`** to keep the prompt cache warm while you are away; see [The prompt cache and keep-warm](#the-prompt-cache-and-keep-warm).
+- **Click `Keep warm`** (on the collapsed lines, the timer `47:12`) to keep the prompt cache warm while you are away; see [The prompt cache and keep-warm](#the-prompt-cache-and-keep-warm).
+- **Click `Refresh caps`**, shown while keep-warm is on, to start keep-warm's caps over: its pings and time on go back to zero and a ping's failures are forgotten, without a ping or a change to when the next one goes out.
+- **Buttons:** a terminal draws a button as `[ label ]`. The desktop app draws a Client's Buttons as plain text, so there each one is drawn as a filled chip: grey, and green for `Keep warm` while it is on.
 - **`/context-bar`** hides or shows the band. Where the band can't be drawn (the VS Code extension's chat panel, `claude -p`), it answers with the reading as one line instead: `5H 62% (2h 14m) · WK 31% (3d 4h) · CTX 21% (212k / 1M)`.
 - **`/context-bar text`** answers with that line anywhere.
 - **`/context-bar file`** says where the usage snapshot is and when it was last written.
@@ -61,9 +69,11 @@ In the real band each bar is filled in proportion and coloured: a coloured fill 
 
 ## The prompt cache and keep-warm
 
-Claude Code sends your whole conversation with every request; the API caches that prefix and bills a re-read at the cached rate. The cache lasts one TTL after the last request: **one hour** on a Claude subscription within your plan's usage, **five minutes** with an API key, a cloud provider or usage credits, or whatever `FORCE_PROMPT_CACHING_5M`, `CLAUDE_CODE_PROMPT_CACHE_TTL`, the `promptCacheTtl` setting or `ENABLE_PROMPT_CACHING_1H` say (in that order). The `TTL` row shows which applies and why, e.g. `1h · subscription`, `5m · FORCE_PROMPT_CACHING_5M`, or `1h · confirmed` once a keep-warm ping has proved the hour. The band cannot ask Claude Code for the exact expiry (the mod API does not expose it), so it counts from the end of the last response, as Claude Code's own `/model` warmth check does; the API counts from the start of the last request, so the real expiry is earlier by the length of that response.
+Claude Code sends your whole conversation with every request; the API caches that prefix and bills a re-read at the cached rate. The cache lasts one TTL after the last request: **one hour** on a Claude subscription within your plan's usage, **five minutes** with an API key, a cloud provider or usage credits, or whatever `FORCE_PROMPT_CACHING_5M`, `CLAUDE_CODE_PROMPT_CACHE_TTL`, the `promptCacheTtl` setting or `ENABLE_PROMPT_CACHING_1H` say (in that order). The `TTL` row shows the TTL as the denominator of its timer, `52:50 / 60:00`; which one applies and why (`1h · subscription`, `5m · FORCE_PROMPT_CACHING_5M`, or `1h · confirmed` once a keep-warm ping has proved the hour) is in `/context-bar text` and the snapshot's `cache.ttlSource`. The band cannot ask Claude Code for the exact expiry (the mod API does not expose it), so it counts from the end of the last response, as Claude Code's own `/model` warmth check does; the API counts from the start of the last request, so the real expiry is earlier by the length of that response.
 
-**Keep warm** is off by default and never saved. Turn it on by clicking the timer or `Keep warm` while the cache is warm. Token Watch then asks Claude Code to send one tiny request over the conversation (`$.model.fork`: the same prefix plus "Reply with the single word: ok") 8 minutes before the hour would run out, or 75 seconds before five minutes would, and again before each renewed window. (The lead times are counted from the end of the last response; see the TTL note under Good to know for what that means on the five-minute TTL.) The API serves that request from the cache and renews the entries it read for another TTL.
+**Keep warm** is off by default and never saved. Turn it on by clicking `Keep warm` (on the collapsed lines, the timer) while the cache is warm. Token Watch then asks Claude Code to send one tiny request over the conversation (`$.model.fork`: the same prefix plus "Reply with the single word: ok") 8 minutes before the hour would run out, or 75 seconds before five minutes would, and again before each renewed window. (The lead times are counted from the end of the last response; see the TTL note under Good to know for what that means on the five-minute TTL.) The API serves that request from the cache and renews the entries it read for another TTL.
+
+While keep-warm is on, the row shows its caps, `Pings: 0/8  Time: 00:26 / 8:00:00`, and a **Refresh caps** button. Refresh caps starts the caps over: pings back to 0, time back to 00:00, a ping's failures forgotten and the note cleared, with keep-warm still on. It does not send a ping or move the schedule, so the next ping goes out when it was going to. It does nothing while keep-warm is off, and the button is not drawn then.
 
 Measured in headless sessions (October 2026, Opus 5.5): with the TTL forced to five minutes, a message eight minutes after the last response read nothing from the cache; with one ping at four minutes it read 47k tokens. On the hour, a message at 65 minutes read nothing; with one ping at 55 minutes it read the 33k tokens the ping had read. A ping reads about 70% of the prompt (its request differs from yours in its tail) and your next message re-writes the rest, which it re-writes after any turn.
 
@@ -75,11 +85,11 @@ Every ping is a real request, counted against your plan usage like any other. Pe
 - cache writes: `cache_creation × r_in × 1.25` (the fork's own tail, about 14k tokens in the measurements, written at the five-minute rate);
 - output: a handful of tokens at `r_out`.
 
-The multipliers are the API's published ones (platform.claude.com, prompt caching, Pricing). The row shows each ping's actual counts for a minute (`ping read 33k · wrote 14k`), and `/context-bar text` keeps the last ping's. On the hour, keep-warm stops after 8 pings or 8 hours; on five minutes, after 30 pings or 2 hours. It also stops when you send a prompt (a background notification, schedule or peer message does not count), after two failed pings in a row, when a ping finds the cache already cold (so the next would only pay to re-cache), at compaction, and at `/clear`.
+The multipliers are the API's published ones (platform.claude.com, prompt caching, Pricing). The row shows each ping's actual counts for a minute (in a band at least 90 columns wide) (`ping read 33k · wrote 14k`), and `/context-bar text` keeps the last ping's. On the hour, keep-warm stops after 8 pings or 8 hours; on five minutes, after 30 pings or 2 hours. It also stops when you send a prompt (a background notification, schedule or peer message does not count), after two failed pings in a row, when a ping finds the cache already cold (so the next would only pay to re-cache), at compaction, and at `/clear`.
 
 ### Idle compaction
 
-On the one-hour TTL, Claude Code can compact a conversation of 200k tokens or more about 54 minutes into an idle hour (`idleCompaction`, on by default). Compaction replaces your conversation and stops keep-warm, so on large conversations the two work against each other; the row says `idle compaction on` when that applies. To keep warm instead of compacting, set `"idleCompaction": false` (or the **Idle compaction** row in `/config`).
+On the one-hour TTL, Claude Code can compact a conversation of 200k tokens or more about 54 minutes into an idle hour (`idleCompaction`, on by default). Compaction replaces your conversation and stops keep-warm, so on large conversations the two work against each other. To keep warm instead of compacting, set `"idleCompaction": false` (or the **Idle compaction** row in `/config`).
 
 ## Install
 
@@ -235,7 +245,7 @@ The snapshot file is described [above](#the-usage-snapshot).
 | `session.compact`, `session.end` | Compaction stops keep-warm and restarts the countdown; `/clear` forgets the cache. |
 | `command.run` (`context-bar`) | Shows or hides the band where it draws; answers with the reading as text where nothing draws, with `text`, or with the snapshot's path with `file`. |
 | `ui.render` (`AbovePrompt`) | Draws the band as a client module ([`hooks/band.tsx`](hooks/band.tsx)). The band lays itself out to the available width and reports clicks. Other mods drawing above the prompt keep their place; Token Watch adds its band beneath theirs. |
-| `ui.message` | Receives the clicks: a right click moves to the next view, the timer or `Keep warm` toggles keep-warm. |
+| `ui.message` | Receives the clicks: a right click moves to the next view, the timer or `Keep warm` toggles keep-warm, `Refresh caps` starts its caps over. |
 
 **Bars on each surface:** on the desktop app, bars are boxes 60% of the line's height. In a terminal they are `▄` blocks. Both are thinner than the line, so stacked bars keep a gap between them.
 
@@ -275,7 +285,7 @@ claude plugin test .
 - sharing the band with another mod,
 - the text reply where nothing draws (the VS Code chat panel, headless),
 - the usage snapshot: its content, the heartbeat, several sessions, the off switch,
-- the TTL row, its countdown and colours, both buttons, keep-warm's schedule with a mocked clock and a stubbed fork, its caps and every stop condition, the TTL's precedence, the snapshot's cache object.
+- the TTL row, its countdown and colours, the buttons and the desktop's chips, Refresh caps, keep-warm's schedule with a mocked clock and a stubbed fork, its caps and every stop condition, the TTL's precedence, the snapshot's cache object.
 
 **Seeing your edits:**
 - In an open session, `/reload-plugins` reads the plugin straight from its folder.

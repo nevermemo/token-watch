@@ -27,7 +27,8 @@
 // ui.render (AbovePrompt): the band, drawn by the Client in ./band.tsx, which
 //   lays itself out to the room it is given and reports clicks.
 // ui.message: the band was clicked: { action: 'cycle' } (right click) moves
-//   to the next view, { action: 'keep-warm' } (either button) toggles it.
+//   to the next view, { action: 'keep-warm' } (the timer or Keep warm)
+//   toggles keep-warm, { action: 'refresh-caps' } starts its caps over.
 //
 // A reading is $.session.usage({ breakdown: 'summary' }): the /context rows,
 // estimated locally, so it costs no token-count request, and the plan's
@@ -272,6 +273,10 @@ export const register: Register = (on, options) => {
       await toggleKeepWarm($)
       return {}
     }
+    if (action === 'refresh-caps') {
+      await refreshCaps($)
+      return {}
+    }
 
     return next(e)
   })
@@ -450,6 +455,16 @@ async function toggleKeepWarm($) {
       await schedule($)
     }
   }
+  await writeSnapshot($)
+}
+
+// Refresh caps: keep-warm starts its pings and its time over from now, as
+// if just turned on, without a ping or a gap in the schedule. Only while it is on.
+async function refreshCaps($) {
+  await tick($)
+  const now = await read($, nowMs)
+  if (!(await read($, keepWarm)).on) return
+  await update($, keepWarm, kw => ({ ...kw, pings: 0, failures: 0, startedAt: now, note: null }))
   await writeSnapshot($)
 }
 
