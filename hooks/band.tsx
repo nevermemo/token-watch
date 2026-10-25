@@ -21,13 +21,15 @@
 //   columns, over a track in one quiet colour for what is still available.
 //   On the context bar the reserve past the auto-compact point is a darker
 //   shade than the free space before it. Pieces are pure proportion, with no
-//   one-cell minimum, so a bar's fill matches the printed percentage. Then the
-//   TTL row: the prompt cache's time left over its whole TTL, "52:50 /
-//   60:00", and a Keep warm Button; while keep-warm is on, its caps, "Pings:
-//   0/8  Time: 00:26 / 8:00:00", and a Refresh caps Button; for a minute after
-//   a ping or a stop, a dim note. The caps and the note go below 90 columns.
-//   Under CTX, the legend, largest category first, with 2-cell swatches,
-//   wrapping onto more lines when it does not fit.
+//   one-cell minimum, so a bar's fill matches the printed percentage. Under
+//   CTX, the legend, largest category first, with 2-cell swatches, wrapping
+//   onto more lines when it does not fit. Then the TTL row: the prompt
+//   cache's time left over its whole TTL, "52:50 / 60:00", and the keep-warm
+//   Button, which says what pressing it would do or why it cannot ("Keep
+//   Warm", "Let Chill", "Cache Lost", "No Data"); while keep-warm is on, its
+//   caps, "Pings: 0/8  Time: 00:26 / 8:00:00", and a Refresh Caps Button; for
+//   a minute after a ping or a stop, a dim note. The caps and the note go
+//   below 90 columns.
 // Collapsed with bars ('bars'): one line in the table's language. Each usage
 //   window as label, a 10-cell meter and percentage; then CTX as label, the
 //   context bar filling the rest, percentage and "212k / 1M"; then the timer.
@@ -37,13 +39,16 @@
 // Collapsed without bars ('plain'): the line's labels, percentages, detail
 //   and timer alone.
 //
-// The collapsed views' timer: a 2-cell swatch in keep-warm's colour (green
-// on, grey off, red once the cache has gone cold) and the countdown as a
-// Button, "47:12". It reads "--:--" before the first
-// response, the whole TTL while a turn runs, "cold" once the countdown has
-// run out. Pressing it, or Keep warm, posts { action: 'keep-warm' }. Between
-// the hooks module's clock readings (every 30 s) the countdown ticks on the
-// Client's frame clock.
+// The collapsed views' timer: the countdown as a Button, "47:12", whose chip
+// is its own indicator (grey with keep-warm off, green on, red with no warm
+// cache). It reads the whole TTL while a turn runs, and "--:--" before the
+// first response or once the countdown has run out. Pressing it, or the
+// expanded row's button, posts { action: 'keep-warm' }. Between the hooks
+// module's clock readings (every 30 s) the countdown ticks on the Client's
+// frame clock.
+//
+// Every Button is a chip: a Box filled with the indicator's colour around a
+// plain Button, the same on both surfaces.
 //
 // The pointer: a right click posts { action: 'cycle' }, which moves to the
 // next view; a left click does nothing but press a Button; hover brightens
@@ -53,7 +58,7 @@ import type { ClientModule } from 'claude-code'
 
 import type { BandProps, Limit, Reading } from '../types'
 import { NOTE_MS } from './cache'
-import { cacheLabel, capsLine, countdown, label, levelColor, short, sorted, timerText } from './format'
+import { bandTimerLabel, capsLine, countdown, label, levelColor, short, sorted, timerText } from './format'
 
 // Local state: whether the pointer is over the band, and the frame clock's
 // milliseconds since the instance started (what the countdown ticks on).
@@ -75,15 +80,34 @@ type Row = { label: string; bar: unknown[]; percent: number; detail: string }
 // auto-compact point a step darker.
 const TRACK = '#3d4250'
 
-// The desktop's button chips: a grey one, and green while what it controls is on.
+// The button chips: grey, green while keep-warm is on, and red for
+// the timer once the cache has gone cold.
 const CHIP_OFF = '#4a5060'
 const CHIP_ON = '#2f7a4f'
+const CHIP_COLD = '#a8433f'
+
+// A chip's margin, inside its Button's label so the whole chip is clickable.
+// The desktop draws a proportional font, where an ordinary space is a few
+// pixels wide, so there an en space (U+2002), about the width of the cell of
+// padding a chip would otherwise have; a terminal cell takes a non-breaking
+// space. Neither is trimmed the way an ordinary space may be.
+const PAD_DESKTOP = ' '
+const PAD_TERMINAL = ' '
+
+// The cells of the expanded row's longest button label, "Cache Lost".
+const WARM_CELLS = 10
+
+// A terminal label centred in so many cells with non-breaking spaces, any odd
+// one on the right.
+function centred(text: string, cells: number) {
+  const gap = Math.max(0, cells - text.length)
+  const left = Math.floor(gap / 2)
+  return PAD_TERMINAL.repeat(left) + text + PAD_TERMINAL.repeat(gap - left)
+}
+
+// The reserve past the auto-compact point, a step darker than the track.
 const RESERVE = '#2e3139'
 
-// Keep-warm's colours: on, off, and a cache that has gone cold.
-const WARM_ON = '#7fd4a0'
-const WARM_OFF = '#6e7383'
-const WARM_COLD = '#e06c6c'
 
 // What a terminal draws a piece with: the lower half block, shorter than its
 // cell, and one every console font has (the finer ▆ is missing from Consolas
@@ -118,9 +142,9 @@ const METER_WIDTH = 10
 const BAR_MIN = 8
 const METERS_BAR_MIN = 20
 
-// The timer on the collapsed line: its gap, the 2-cell swatch, a space and
-// "47:12".
-const TIMER_CELLS = CELL_GAP + 2 + 1 + 5
+// The timer on the collapsed line: its gap and its chip, "47:12" between a
+// cell of margin each side.
+const TIMER_CELLS = CELL_GAP + 1 + 5 + 1
 
 const Band: ClientModule<BandProps, Local> = (props, surface) => {
   const { Box, Text, Button } = surface.elements
@@ -159,32 +183,35 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
   const draw = pieces(Box, Text, props.surface, surface.columns)
 
   // A Button inside a Client draws as plain text on the desktop app (measured),
-  // so there each Button sits on a filled chip to read as a button: grey, or
-  // green while what it controls is on. A terminal already draws "[ label ]".
-  const chip = (key: string, text: string, isOn: boolean, action: string) => {
-    const button = (
-      <Button key={key} onPress={() => surface.post({ action })}>
-        {text}
+  // so every Button sits on a filled chip to read as a button, the chip's
+  // colour saying its state. The terminal gets the same chip, its Button
+  // drawn plain (the label alone, without "[ ]"), so both surfaces look alike.
+  // The chip's margins are spaces inside the label, not padding, so the whole
+  // chip is the Button and a click anywhere on it presses it.
+  const pad = props.surface === 'desktop' ? PAD_DESKTOP : PAD_TERMINAL
+  const chip = (key: string, text: string, fill: string, action: string) => (
+    <Box key={`${key}-chip`} flexShrink={0} backgroundColor={fill}>
+      <Button key={key} plain onPress={() => surface.post({ action })}>
+        {`${pad}${text}${pad}`}
       </Button>
-    )
-    if (props.surface !== 'desktop') return button
-    return (
-      <Box key={`${key}-chip`} flexShrink={0} paddingX={1} backgroundColor={isOn ? CHIP_ON : CHIP_OFF}>
-        {button}
-      </Box>
-    )
-  }
-
-  const isCold = cache.warmUntil !== null && !isWorking && now >= cache.warmUntil
-  const warmColor = isCold ? WARM_COLD : keepWarm.on ? WARM_ON : WARM_OFF
-  const timer = (
-    <Box flexDirection="row" alignItems="center" columnGap={1} flexShrink={0}>
-      <Box width={2} height={1} flexDirection="row" alignItems="center" flexShrink={0}>
-        {draw(warmColor, { grow: 1 })}
-      </Box>
-      {chip('cache-timer', cacheLabel(cache, now, isWorking), false, 'keep-warm')}
     </Box>
   )
+
+  // The buttons are the indicators: the collapsed views' timer is grey with
+  // keep-warm off, green with it on, red with no warm cache (before the first
+  // response, or once the countdown has run out, when the timer reads "--:--").
+  const isUnknown = !isWorking && cache.warmUntil === null
+  const isCold = isUnknown || (!isWorking && now >= cache.warmUntil!)
+  const timerFill = isCold ? CHIP_COLD : keepWarm.on ? CHIP_ON : CHIP_OFF
+
+  // The expanded row's button, in the timer's colour, says what pressing it
+  // would do, or why it cannot: "No Data" before the first response, "Cache
+  // Lost" once the cache has gone cold, "Let Chill" while keep-warm is on,
+  // else "Keep Warm". The terminal centres it in the longest label's cells so
+  // the caps after it stay put; the desktop's proportional font cannot.
+  const warmText = isUnknown ? 'No Data' : isCold ? 'Cache Lost' : keepWarm.on ? 'Let Chill' : 'Keep Warm'
+  const warmLabel = props.surface === 'desktop' ? warmText : centred(warmText, WARM_CELLS)
+  const timer = chip('cache-timer', bandTimerLabel(cache, now, isWorking), timerFill, 'keep-warm')
 
   if (view !== 'expanded') {
     const showBars = view === 'bars'
@@ -289,6 +316,14 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
           )}
         </Box>
       ))}
+      <Box flexDirection="row" flexWrap="wrap" alignItems="center" columnGap={3} paddingLeft={labelWidth + 2}>
+        {legend.map(slice => (
+          <Box key={slice.label} flexDirection="row" alignItems="center" columnGap={1} flexShrink={0}>
+            {swatch(slice.color)}
+            <Text dimColor>{`${LEGEND[slice.label] ?? slice.label} ${short(slice.tokens)}`}</Text>
+          </Box>
+        ))}
+      </Box>
       <Box flexDirection="row" alignItems="center" columnGap={2}>
         <Box width={labelWidth} flexShrink={0}>
           <Text dimColor wrap="truncate">
@@ -296,16 +331,16 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
           </Text>
         </Box>
         <Box flexShrink={0}>
-          <Text {...(isCold ? { color: WARM_COLD } : {})}>{timerText(cache, now, isWorking)}</Text>
+          <Text>{timerText(cache, now, isWorking)}</Text>
         </Box>
-        {chip('keep-warm', 'Keep warm', keepWarm.on, 'keep-warm')}
+        {chip('keep-warm', warmLabel, timerFill, 'keep-warm')}
         {showCaps && (
           <Box flexShrink={0} marginLeft={1}>
             <Text dimColor>{capsLine(keepWarm, cache, now)}</Text>
           </Box>
         )}
         {showCaps && (
-          chip('refresh-caps', 'Refresh caps', false, 'refresh-caps')
+          chip('refresh-caps', 'Refresh Caps', CHIP_OFF, 'refresh-caps')
         )}
         {note !== '' && (
           <Box flexShrink={1} minWidth={0}>
@@ -314,14 +349,6 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
             </Text>
           </Box>
         )}
-      </Box>
-      <Box flexDirection="row" flexWrap="wrap" alignItems="center" columnGap={3} paddingLeft={labelWidth + 2}>
-        {legend.map(slice => (
-          <Box key={slice.label} flexDirection="row" alignItems="center" columnGap={1} flexShrink={0}>
-            {swatch(slice.color)}
-            <Text dimColor>{`${LEGEND[slice.label] ?? slice.label} ${short(slice.tokens)}`}</Text>
-          </Box>
-        ))}
       </Box>
     </Box>
   )

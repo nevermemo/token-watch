@@ -88,31 +88,43 @@ const leftClick = { type: 'up', x: 5, y: 0, button: 'left' } as const
 const paint = (surface: 'terminal' | 'desktop', color: string) =>
   surface === 'desktop' ? `"backgroundColor":"${color}"` : `"color":"${color}","wrap":"wrap"`
 
-// Keep-warm's colours and the countdown's labels as the tree spells them.
-const WARM_ON = '#7fd4a0'
-const WARM_OFF = '#6e7383'
-const WARM_COLD = '#e06c6c'
-// The desktop's button chips: grey, and green for Keep warm while it is on.
+// The button chips, which are the indicators: grey with keep-warm off, green
+// with it on, red with no warm cache (before the first response, or once the
+// countdown has run out).
 const CHIP_OFF = '#4a5060'
 const CHIP_ON = '#2f7a4f'
+const CHIP_COLD = '#a8433f'
 
-// A Button as the tree spells it. On the terminal it stands bare, a plain
-// Button with just its key and label (no plain, dim or variant props). On the
-// desktop it sits inside a Box that fills it as a chip.
-const buttonJson = (key: string, label: string) => `{"type":"Button","props":{"key":"${key}","label":"${label}"}`
-const chipOf = (surface: 'terminal' | 'desktop', key: string, label: string, fill: string) =>
-  surface === 'desktop'
-    ? `{"type":"Box","props":{"key":"${key}-chip","flexShrink":0,"paddingX":1,"backgroundColor":"${fill}"},"children":[${buttonJson(key, label)}`
-    : buttonJson(key, label)
-const keepWarmOn = (surface: 'terminal' | 'desktop') => chipOf(surface, 'keep-warm', 'Keep warm', CHIP_ON)
-const keepWarmOff = (surface: 'terminal' | 'desktop') => chipOf(surface, 'keep-warm', 'Keep warm', CHIP_OFF)
-const refreshCapsBtn = (surface: 'terminal' | 'desktop') => chipOf(surface, 'refresh-caps', 'Refresh caps', CHIP_OFF)
-// The collapsed views' timer: the countdown as a chip, always grey.
-const cacheBtn = (surface: 'terminal' | 'desktop', text: string) => chipOf(surface, 'cache-timer', text, CHIP_OFF)
-// The expanded row's timer text, "52:50 / 60:00", plain, or red once the cache is cold.
+type Surface = 'terminal' | 'desktop'
+
+// A chip's margin, inside its Button's label: an en space on the desktop, a
+// no-break space in a terminal.
+const pad = (surface: Surface) => (surface === 'desktop' ? ' ' : ' ')
+
+// A Button as the tree spells it on both surfaces: a plain Button, its label
+// carrying the margins, inside a Box that fills it as a chip.
+const chipOf = (surface: Surface, key: string, label: string, fill: string) =>
+  `{"type":"Box","props":{"key":"${key}-chip","flexShrink":0,"backgroundColor":"${fill}"},"children":[` +
+  `{"type":"Button","props":{"key":"${key}","label":"${pad(surface)}${label}${pad(surface)}","plain":true}`
+
+// The expanded row's keep-warm label: a terminal centres it in the cells of
+// the longest, "Cache Lost", any odd cell on the right; the desktop does not.
+const warmLabel = (surface: Surface, label: string) => {
+  if (surface === 'desktop') return label
+  const gap = 10 - label.length
+  return ' '.repeat(Math.floor(gap / 2)) + label + ' '.repeat(gap - Math.floor(gap / 2))
+}
+const keepWarmOff = (surface: Surface) => chipOf(surface, 'keep-warm', warmLabel(surface, 'Keep Warm'), CHIP_OFF)
+const keepWarmOn = (surface: Surface) => chipOf(surface, 'keep-warm', warmLabel(surface, 'Let Chill'), CHIP_ON)
+const keepWarmCold = (surface: Surface) => chipOf(surface, 'keep-warm', warmLabel(surface, 'Cache Lost'), CHIP_COLD)
+const keepWarmNoData = (surface: Surface) => chipOf(surface, 'keep-warm', warmLabel(surface, 'No Data'), CHIP_COLD)
+const refreshCapsBtn = (surface: Surface) => chipOf(surface, 'refresh-caps', 'Refresh Caps', CHIP_OFF)
+// The collapsed views' timer: the countdown as a chip in the indicator's colour.
+const cacheBtn = (surface: Surface, text: string, fill: string) => chipOf(surface, 'cache-timer', text, fill)
+// The expanded row's timer text, "52:50 / 60:00", always in the plain colour.
 const timerTxt = (text: string) => `{"type":"Text","children":["${text}"]}`
-const coldTxt = (text: string) => `{"type":"Text","props":{"color":"${WARM_COLD}"},"children":["${text}"]}`
-const REFRESH_CAPS = '"label":"Refresh caps"'
+const KEEP_WARM_KEY = '"key":"keep-warm"'
+const REFRESH_CAPS_KEY = '"key":"refresh-caps"'
 
 type Boot = {
   // What $.session.surfaces() answers; [surface] by default, none for null.
@@ -248,13 +260,15 @@ describe('context bar', () => {
         expect(count(expanded, '"backgroundColor":"#2e3139"')).toBe(1)
         // Messages: the context bar's piece and the legend's swatch.
         expect(count(expanded, '"backgroundColor":"#d97757"')).toBe(2)
-        // The one other filled box is Keep warm's grey chip.
-        expect(count(expanded, `"backgroundColor":"${CHIP_OFF}"`)).toBe(1)
+        // The one other filled box is the keep-warm chip, red with nothing cached.
+        expect(count(expanded, `"backgroundColor":"${CHIP_COLD}"`)).toBe(1)
+        expect(expanded).not.toContain(CHIP_OFF)
         expect(expanded).not.toContain(CHIP_ON)
       } else {
-        // Clipped runs of lower blocks; no box background and no 60% box.
+        // Clipped runs of lower blocks and no 60% box; the one box background
+        // is the keep-warm chip.
         expect(expanded).toContain('▄')
-        expect(expanded).not.toMatch(/"type":"Box","props":{[^}]*"backgroundColor"/)
+        expect(count(expanded, '"backgroundColor"')).toBe(1)
         expect(expanded).not.toContain('"height":"60%"')
         expect(count(expanded, '"color":"#3d4250","wrap":"wrap"')).toBe(3)
         expect(count(expanded, '"color":"#2e3139","wrap":"wrap"')).toBe(1)
@@ -265,17 +279,18 @@ describe('context bar', () => {
       expect(expanded.indexOf('"5H"')).toBeLessThan(expanded.indexOf('"WK"'))
       expect(expanded.indexOf('"WK"')).toBeLessThan(expanded.indexOf('"CTX"'))
       expect(expanded.indexOf('"CTX"')).toBeLessThan(expanded.indexOf('"TTL"'))
-      // The TTL row before the first response: "--:-- / 60:00" and a Keep
-      // warm Button (a grey chip on the desktop). No bar, no swatch, no source
-      // (an hour on a subscription, idle compaction on), no caps.
+      // The TTL row before the first response: "--:-- / 60:00" in the plain
+      // colour and the keep-warm Button reading "No Data" in a red chip. No
+      // bar, no swatch, no source (an hour on a subscription, idle compaction
+      // on), no caps. It comes after the legend.
       expect(expanded).toContain(timerTxt('--:-- / 60:00'))
-      expect(expanded).toContain(keepWarmOff(surface))
+      expect(expanded).toContain(keepWarmNoData(surface))
+      expect(expanded.indexOf('agents 1.1k')).toBeLessThan(expanded.indexOf('"TTL"'))
       expect(expanded).not.toContain('cache-timer')
-      expect(expanded).not.toContain(paint(surface, WARM_OFF))
       expect(expanded).not.toContain('subscription')
       expect(expanded).not.toContain('idle compaction')
       expect(expanded).not.toContain('Pings:')
-      expect(expanded).not.toContain('Refresh caps')
+      expect(expanded).not.toContain(REFRESH_CAPS_KEY)
       // 62% is a warning, 31% and 21% are plain.
       expect(expanded).toContain('{"type":"Text","props":{"wrap":"truncate","color":"#e8c66a"},"children":["62%"]}')
       expect(expanded).toContain('{"type":"Text","props":{"wrap":"truncate"},"children":["31%"]}')
@@ -338,7 +353,7 @@ describe('context bar', () => {
         expect(count(collapsed, '"backgroundColor":"#d97757"')).toBe(1)
       } else {
         expect(collapsed).toContain('▄')
-        expect(collapsed).not.toMatch(/"type":"Box","props":{[^}]*"backgroundColor"/)
+        expect(count(collapsed, '"backgroundColor"')).toBe(1)
         expect(count(collapsed, '"color":"#3d4250","wrap":"wrap"')).toBe(3)
         expect(count(collapsed, '"color":"#2e3139","wrap":"wrap"')).toBe(1)
         expect(count(collapsed, '"color":"#d97757","wrap":"wrap"')).toBe(1)
@@ -347,11 +362,11 @@ describe('context bar', () => {
       expect(collapsed).not.toContain('messages')
       expect(collapsed).not.toContain('compacts at')
       expect(collapsed).not.toContain('2h 14m')
-      // The timer ends the line: the swatch and the countdown as a chip, and
+      // The timer ends the line: the countdown as a chip that is its own
+      // indicator, red with nothing cached, with no swatch beside it and
       // nothing else of the TTL row.
-      expect(collapsed).toContain(cacheBtn(surface, '--:--'))
-      expect(collapsed).toContain(paint(surface, WARM_OFF))
-      expect(collapsed).not.toContain('Keep warm')
+      expect(collapsed).toContain(cacheBtn(surface, '--:--', CHIP_COLD))
+      expect(collapsed).not.toContain(KEEP_WARM_KEY)
       expect(collapsed).not.toContain('subscription')
       // Usage first, then the context in the table's order: label, bar,
       // percentage, detail; then the timer.
@@ -365,10 +380,11 @@ describe('context bar', () => {
       await ui.pointer(rightClick)
       const plain = await band()
       expect(plain).not.toContain('borderStyle')
-      // Without bars the one coloured piece left is the timer's swatch.
-      expect(count(plain, surface === 'desktop' ? '"height":"60%"' : '"wrap":"wrap"')).toBe(1)
+      // Without bars no bar leaf is left: the timer's chip is the one coloured piece.
+      expect(count(plain, surface === 'desktop' ? '"height":"60%"' : '"wrap":"wrap"')).toBe(0)
+      expect(count(plain, '"backgroundColor"')).toBe(1)
       expect(plain).toContain('212k / 1M')
-      expect(plain).toContain(cacheBtn(surface, '--:--'))
+      expect(plain).toContain(cacheBtn(surface, '--:--', CHIP_COLD))
       await ui.pointer(rightClick)
       expect(await band()).toContain('messages')
 
@@ -419,17 +435,17 @@ describe('context bar', () => {
       await ui.resize({ columns: 44, rows: 8, in: 'band' })
 
       // At 44 columns the table has no detail column; the TTL row keeps its
-      // timer and Keep warm button at every width, and never shows the source.
+      // timer and keep-warm button at every width, and never shows the source.
       const narrow = await band()
       expect(narrow).toContain('"62%"')
       expect(narrow).not.toContain('2h 14m')
       expect(narrow).not.toContain('212k / 1M')
-      expect(narrow).toContain(keepWarmOff(surface))
+      expect(narrow).toContain(keepWarmNoData(surface))
       expect(narrow).toContain(timerTxt('--:-- / 60:00'))
       expect(narrow).not.toContain('subscription')
       await ui.resize({ columns: 70, rows: 8, in: 'band' })
       const middling = await band()
-      expect(middling).toContain(keepWarmOff(surface))
+      expect(middling).toContain(keepWarmNoData(surface))
       expect(middling).toContain(timerTxt('--:-- / 60:00'))
       expect(middling).toContain('212k / 1M')
       expect(middling).not.toContain('subscription')
@@ -447,7 +463,7 @@ describe('context bar', () => {
       expect(collapsed).toContain('"CTX"')
       expect(collapsed).toContain('"21%"')
       expect(collapsed).toContain('"flexGrow":1860')
-      expect(collapsed).toContain(cacheBtn(surface, '--:--'))
+      expect(collapsed).toContain(cacheBtn(surface, '--:--', CHIP_COLD))
       expect(collapsed).not.toContain('212k / 1M')
       expect(collapsed).not.toContain('"width":10,"height":1')
       await ui.resize({ columns: 60, rows: 8, in: 'band' })
@@ -522,14 +538,14 @@ describe('context bar', () => {
       await ui.pointer(rightClick)
       const plain = await band()
       expect(plain).not.toContain('borderStyle')
-      expect(count(plain, barLeaf)).toBe(1)
+      expect(count(plain, barLeaf)).toBe(0)
       expect(plain).toContain('"62%"')
       expect(plain).toContain('"CTX"')
       expect(plain).toContain('212k / 1M')
-      expect(plain).toContain(cacheBtn(surface, '--:--'))
+      expect(plain).toContain(cacheBtn(surface, '--:--', CHIP_COLD))
       expect(saved.get('view')).toBe('plain')
       await ui.pointer(leftClick)
-      expect(count(await band(), barLeaf)).toBe(1)
+      expect(count(await band(), barLeaf)).toBe(0)
 
       await ui.pointer(rightClick)
       expect(await band()).toContain('borderStyle')
@@ -551,7 +567,7 @@ describe('context bar', () => {
       const { ui, band, saved } = await start($, on, surface, RATE_LIMITS, undefined, { showBars: false, isCollapsed: true })
       const plain = await band()
       expect(plain).not.toContain('borderStyle')
-      expect(count(plain, barLeaf)).toBe(1)
+      expect(count(plain, barLeaf)).toBe(0)
       expect(saved.get('view')).toBe('plain')
       expect(saved.has('isCollapsed')).toBe(false)
       expect(saved.has('showBars')).toBe(false)
@@ -597,6 +613,7 @@ describe('prompt cache', () => {
       // An hour on a subscription: the timer at the whole TTL, over the TTL.
       const fresh = await band()
       expect(fresh).toContain(timerTxt('60:00 / 60:00'))
+      expect(fresh).toContain(keepWarmOff(surface))
       expect(fresh).not.toContain('"flexGrow":10000')
       // The Client's frame clock moves the countdown between the hooks module's readings.
       await ui.advance(1000)
@@ -607,18 +624,20 @@ describe('prompt cache', () => {
       expect(await band()).toContain(timerTxt('47:30 / 60:00'))
       await ui.advance(18_000)
       expect(await band()).toContain(timerTxt('47:12 / 60:00'))
-      // Past the hour the cache is cold: "cold / 60:00" in red.
+      // Past the hour the cache is cold: the timer reads "--:--" in the plain
+      // colour, and the button turns red and says "Cache Lost".
       await clock.advance(47 * MINUTE + 30_000)
       const cold = await band()
-      expect(cold).toContain(coldTxt('cold / 60:00'))
-      expect(cold).not.toContain(timerTxt('cold / 60:00'))
-      // The expanded row has no swatch; the collapsed timer's swatch goes red.
-      expect(cold).not.toContain(paint(surface, WARM_COLD))
+      expect(cold).toContain(timerTxt('--:-- / 60:00'))
+      expect(cold).toContain(keepWarmCold(surface))
+      expect(cold).not.toContain('cold')
+      // The text line says the cache is lost.
+      expect((await run($, 'text')).text).toContain('TTL lost (1h · subscription)')
+      // The collapsed timer: "--:--" in a red chip.
       await ui.pointer(rightClick)
       const collapsed = await band()
-      expect(collapsed).toContain(cacheBtn(surface, 'cold'))
-      expect(collapsed).toContain(paint(surface, WARM_COLD))
-      expect(collapsed).not.toContain(paint(surface, WARM_OFF))
+      expect(collapsed).toContain(cacheBtn(surface, '--:--', CHIP_COLD))
+      expect(collapsed).not.toContain(CHIP_OFF)
     })
 
     test(`${surface}: while a turn runs the timer shows the whole TTL`, async ($, on) => {
@@ -627,84 +646,93 @@ describe('prompt cache', () => {
       expect(await band()).toContain(timerTxt('60:00 / 60:00'))
     })
 
-    test(`${surface}: pressing Keep warm or the timer before any response leaves keep-warm off and says why`, async ($, on) => {
+    test(`${surface}: pressing the button or the timer before any response leaves keep-warm off and says why`, async ($, on) => {
       const { ui, band, forks } = await start($, on, surface, RATE_LIMITS)
       await ui.press({ key: 'keep-warm' })
       const after = await band()
-      expect(after).toContain(keepWarmOff(surface))
+      expect(after).toContain(keepWarmNoData(surface))
       expect(after).toContain(timerTxt('--:-- / 60:00'))
       expect(after).toContain('keep-warm: nothing cached yet')
       expect(forks.length).toBe(0)
       // The collapsed timer is the same control: it leaves keep-warm off too.
       await ui.pointer(rightClick)
       await ui.press({ key: 'cache-timer' })
-      expect(await band()).toContain(paint(surface, WARM_OFF))
+      expect(await band()).toContain(cacheBtn(surface, '--:--', CHIP_COLD))
       await ui.pointer(rightClick)
       await ui.pointer(rightClick)
       const expanded = await band()
-      expect(expanded).toContain(keepWarmOff(surface))
+      expect(expanded).toContain(keepWarmNoData(surface))
       expect(expanded).toContain('keep-warm: nothing cached yet')
       expect(forks.length).toBe(0)
     })
 
-    test(`${surface}: Keep warm and the collapsed views' timer both toggle keep-warm`, async ($, on) => {
+    test(`${surface}: the expanded row's button and the collapsed views' timer both toggle keep-warm`, async ($, on) => {
       const { ui, band } = await start($, on, surface, RATE_LIMITS)
       await turn($)
       await ui.press({ key: 'keep-warm' })
       const on1 = await band()
       expect(on1).toContain(keepWarmOn(surface))
-      if (surface === 'desktop') expect(on1).not.toContain(keepWarmOff(surface))
+      expect(on1).not.toContain(keepWarmOff(surface))
       expect(on1).toContain(timerTxt('60:00 / 60:00'))
       expect(on1).toContain('Pings: 0/8  Time: 00:00 / 8:00:00')
       expect(on1).toContain(refreshCapsBtn(surface))
-      // No swatch, no TTL source and no timer Button in the expanded row.
-      expect(on1).not.toContain(paint(surface, WARM_ON))
+      // No TTL source and no timer Button in the expanded row.
       expect(on1).not.toContain('subscription')
       expect(on1).not.toContain('cache-timer')
       await ui.press({ key: 'keep-warm' })
       const off1 = await band()
       expect(off1).toContain(keepWarmOff(surface))
       expect(off1).not.toContain('Pings:')
-      expect(off1).not.toContain('Refresh caps')
+      expect(off1).not.toContain(REFRESH_CAPS_KEY)
       await ui.pointer(rightClick)
       await ui.press({ key: 'cache-timer' })
-      expect(await band()).toContain(paint(surface, WARM_ON))
+      expect(await band()).toContain(cacheBtn(surface, '60:00', CHIP_ON))
       await ui.pointer(rightClick)
       await ui.press({ key: 'cache-timer' })
-      expect(await band()).toContain(paint(surface, WARM_OFF))
+      expect(await band()).toContain(cacheBtn(surface, '60:00', CHIP_OFF))
     })
 
-    test(`${surface}: Keep warm's chip is green while keep-warm is on and grey while it is off`, async ($, on) => {
+    test(`${surface}: the button reads Let Chill in green while keep-warm is on and Keep Warm in grey while it is off`, async ($, on) => {
       const { ui, band } = await start($, on, surface, RATE_LIMITS)
       await turn($)
       expect(await band()).toContain(keepWarmOff(surface))
       await ui.press({ key: 'keep-warm' })
       const on1 = await band()
+      // Both surfaces draw the same chip: a filled Box around a plain Button,
+      // green while on; the Refresh Caps chip beside it stays grey.
       expect(on1).toContain(keepWarmOn(surface))
-      if (surface === 'desktop') {
-        // The chip is a Box around the Button: green while on; the Refresh
-        // caps chip beside it stays grey.
-        expect(on1).toContain(
-          `"backgroundColor":"${CHIP_ON}"},"children":[{"type":"Button","props":{"key":"keep-warm","label":"Keep warm"}`,
-        )
-        expect(count(on1, `"backgroundColor":"${CHIP_ON}"`)).toBe(1)
-        expect(count(on1, `"backgroundColor":"${CHIP_OFF}"`)).toBe(1)
-      } else {
-        // A terminal draws its own "[ label ]": no Box background to colour.
-        expect(on1).not.toMatch(/"type":"Box","props":{[^}]*"backgroundColor"/)
-        expect(on1).not.toContain('"variant"')
-        expect(on1).not.toContain('"plain"')
-      }
+      expect(count(on1, `"backgroundColor":"${CHIP_ON}"`)).toBe(1)
+      expect(count(on1, `"backgroundColor":"${CHIP_OFF}"`)).toBe(1)
+      expect(on1).not.toContain('"variant"')
       await ui.press({ key: 'keep-warm' })
       const off1 = await band()
       expect(off1).toContain(keepWarmOff(surface))
-      if (surface === 'desktop') {
-        expect(off1).toContain(
-          `"backgroundColor":"${CHIP_OFF}"},"children":[{"type":"Button","props":{"key":"keep-warm","label":"Keep warm"}`,
-        )
-        expect(off1).not.toContain(CHIP_ON)
+      expect(off1).not.toContain(CHIP_ON)
+    })
+
+    test(`${surface}: a terminal centres the button's label in ten cells so the caps after it stay put; the desktop does not`, async ($, on) => {
+      const { ui, band, clock } = await start($, on, surface, RATE_LIMITS)
+      const labelOf = (s: string) => s.match(/"key":"keep-warm","label":"([^"]*)"/)![1]
+      const labels = [labelOf(await band())]
+      await turn($)
+      labels.push(labelOf(await band()))
+      await ui.press({ key: 'keep-warm' })
+      labels.push(labelOf(await band()))
+      await ui.press({ key: 'keep-warm' })
+      await clock.advance(61 * MINUTE)
+      labels.push(labelOf(await band()))
+      const p = pad(surface)
+      if (surface === 'terminal') {
+        const n = '\u00a0'
+        expect(labels).toEqual([
+          `${p}${n}No Data${n}${n}${p}`,
+          `${p}Keep Warm${n}${p}`,
+          `${p}Let Chill${n}${p}`,
+          `${p}Cache Lost${p}`,
+        ])
+        expect(new Set(labels.map(l => l.length))).toEqual(new Set([12]))
       } else {
-        expect(off1).not.toMatch(/"type":"Box","props":{[^}]*"backgroundColor"/)
+        expect(labels).toEqual([`${p}No Data${p}`, `${p}Keep Warm${p}`, `${p}Let Chill${p}`, `${p}Cache Lost${p}`])
       }
     })
 
@@ -757,12 +785,11 @@ describe('prompt cache', () => {
       expect(forks.length).toBe(1)
       const stopped = await band()
       expect(stopped).toContain('stopped: cache was cold')
-      expect(stopped).toContain(coldTxt('cold / 5:00'))
-      expect(stopped).toContain(keepWarmOff(surface))
+      expect(stopped).toContain(timerTxt('--:-- / 5:00'))
+      expect(stopped).toContain(keepWarmCold(surface))
       await ui.pointer(rightClick)
       const collapsed = await band()
-      expect(collapsed).toContain(cacheBtn(surface, 'cold'))
-      expect(collapsed).toContain(paint(surface, WARM_COLD))
+      expect(collapsed).toContain(cacheBtn(surface, '--:--', CHIP_COLD))
     })
 
     test(`${surface}: two failed pings in a row stop keep-warm`, async ($, on) => {
@@ -832,7 +859,9 @@ describe('prompt cache', () => {
       expect(compacted).toContain('stopped: compaction')
       expect(compacted).toContain(timerTxt('5:00 / 5:00'))
       await $.session.end({ reason: 'clear', sessionId: 'sess-1', resume: { id: 'sess-1' } } as never)
-      expect(await band()).toContain(timerTxt('--:-- / 5:00'))
+      const cleared = await band()
+      expect(cleared).toContain(timerTxt('--:-- / 5:00'))
+      expect(cleared).toContain(keepWarmNoData(surface))
     })
 
     // The TTL follows Claude Code's controls in their order of precedence, then
@@ -895,7 +924,7 @@ describe('prompt cache', () => {
       expect(narrow).toContain(keepWarmOn(surface))
       expect(narrow).toContain(timerTxt('5:00 / 5:00'))
       expect(narrow).not.toContain('Pings:')
-      expect(narrow).not.toContain('Refresh caps')
+      expect(narrow).not.toContain(REFRESH_CAPS_KEY)
       expect(narrow).not.toContain('ping read')
       await ui.resize({ columns: 90, rows: 8, in: 'band' })
       const edge = await band()
@@ -957,7 +986,7 @@ describe('prompt cache', () => {
       const { ui, band, writes, forks } = await start($, on, surface, RATE_LIMITS, undefined, undefined, FIVE_M)
       await turn($)
       const before = await band()
-      expect(before).not.toContain('Refresh caps')
+      expect(before).not.toContain(REFRESH_CAPS_KEY)
       expect(before).not.toContain('Pings:')
       const written = writes.length
       // There is no such Button to press, and a message that arrives anyway
@@ -967,14 +996,14 @@ describe('prompt cache', () => {
       const after = await band()
       expect(after).toContain(keepWarmOff(surface))
       expect(after).not.toContain('Pings:')
-      expect(after).not.toContain('Refresh caps')
+      expect(after).not.toContain(REFRESH_CAPS_KEY)
       expect(after).not.toContain('keep-warm:')
       expect(JSON.parse(writes[writes.length - 1].text).cache.keepWarm).toMatchObject({ on: false, pings: 0, startedAt: null })
       expect(writes.length).toBe(written)
       expect(forks.length).toBe(0)
       // And it does not turn keep-warm on.
       await ui.pointer(rightClick)
-      expect(await band()).toContain(paint(surface, WARM_OFF))
+      expect(await band()).toContain(cacheBtn(surface, '5:00', CHIP_OFF))
     })
   }
 })

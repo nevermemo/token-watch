@@ -74,12 +74,12 @@ export function hmm(ms: number) {
 }
 
 // The cache timer's label: the whole TTL while a turn runs (its requests
-// refresh the cache), "--:--" before the first response, "cold" once the
+// refresh the cache), "--:--" before the first response, "lost" once the
 // countdown has run out, else the time left.
 export function cacheLabel(cache: CacheState, nowMs: number, isWorking: boolean) {
   if (isWorking) return mmss(TTL_MS[cache.ttl])
   if (cache.warmUntil === null) return '--:--'
-  if (nowMs >= cache.warmUntil) return 'cold'
+  if (nowMs >= cache.warmUntil) return 'lost'
   return mmss(cache.warmUntil - nowMs)
 }
 
@@ -88,8 +88,6 @@ export function ttlText(cache: CacheState) {
   return `${cache.ttl} · ${cache.ttlSource}`
 }
 
-// Keep-warm's caps: pings sent of the most allowed, and time on of the most
-// allowed, "pings 3/30 · 0:42/2:00".
 // A span as hours, minutes and seconds: "8:00:00", "0:42:05".
 export function hmmss(ms: number) {
   const seconds = Math.max(0, Math.floor(ms / 1000))
@@ -106,11 +104,20 @@ export function clockText(ms: number) {
   return `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`
 }
 
+// The band's timer: the time left, "47:12"; the whole TTL while a turn runs;
+// "--:--" when there is no warm cache, before the first response or once the
+// countdown has run out (the band colours both red). The text reply says
+// "lost" for the second (cacheLabel).
+export function bandTimerLabel(cache: CacheState, nowMs: number, isWorking: boolean) {
+  if (isWorking) return mmss(TTL_MS[cache.ttl])
+  if (cache.warmUntil === null || nowMs >= cache.warmUntil) return '--:--'
+  return mmss(cache.warmUntil - nowMs)
+}
+
 // The expanded TTL row's timer: the time left over the whole TTL, "52:50 /
-// 60:00", or "--:-- / 60:00" before the first response, "cold / 60:00" once
-// it has run out, the whole TTL over itself while a turn runs.
+// 60:00", "--:-- / 60:00" with no warm cache.
 export function timerText(cache: CacheState, nowMs: number, isWorking: boolean) {
-  return `${cacheLabel(cache, nowMs, isWorking)} / ${mmss(TTL_MS[cache.ttl])}`
+  return `${bandTimerLabel(cache, nowMs, isWorking)} / ${mmss(TTL_MS[cache.ttl])}`
 }
 
 // Keep-warm's caps on the expanded TTL row: "Pings: 0/8  Time: 00:26 / 8:00:00".
@@ -120,6 +127,8 @@ export function capsLine(keepWarm: KeepWarm, cache: CacheState, nowMs: number) {
   return `Pings: ${keepWarm.pings}/${cap.pings}  Time: ${clockText(elapsed)} / ${hmmss(cap.ms)}`
 }
 
+// Keep-warm's caps for the text reply: pings sent of the most allowed, and
+// time on of the most allowed, "pings 3/30 · 0:42/2:00".
 export function capsText(keepWarm: KeepWarm, cache: CacheState, nowMs: number) {
   const cap = caps(refreshMs(cache.ttl))
   const elapsed = keepWarm.startedAt === null ? 0 : nowMs - keepWarm.startedAt
