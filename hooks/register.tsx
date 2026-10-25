@@ -54,6 +54,13 @@
 // snapshot a companion (Token Watch for VS Code) reads; the plugin's
 // `snapshot` option turns that off.
 //
+// Keep-warm's mode (the settings): Pings, as below; Notify, no pings, one
+// notification ($.ui.notify) a lead time before each countdown runs out,
+// staying on across prompts; Both, pings, and one notification a lead time
+// before the first ping of each idle spell. Alerts: a notification when a
+// usage window (once per window period, shared through the store so one
+// session says it) or this session's context crosses 80% or 95%.
+//
 // Keep-warm: a ping is $.model.fork with a one-word prompt, which repeats the
 // main thread's last request so the API serves it from the cache and
 // refreshes the entry. Pings go out a lead time before the believed expiry,
@@ -79,6 +86,7 @@ import type {
   TtlInputs,
   UsagePart,
   View,
+  WarmMode,
 } from '../types'
 import {
   BACKGROUND_ORIGINS,
@@ -104,16 +112,19 @@ import {
 } from './cache'
 import {
   DEFAULT_SETTINGS,
+  NOTIFY_LEADS,
   PACE_UNITS,
   PACE_WINDOWS,
   VIEWS,
   VIEW_NAMES,
+  WARM_MODES,
   dropAt,
   forecastHiddenIn,
   fromLegacy,
   getAt,
   hiddenIn,
   isCacheHidden,
+  isGlobalOnly,
   isEmptyOverride,
   merge,
   overridesUnder,
@@ -121,12 +132,13 @@ import {
   readOverride,
   readSettings,
   setAt,
+  stepAlert,
   stepIn,
   windowText,
 } from './settings'
 import type { Path } from './settings'
 import { addReadings, fullAt, ratePerHour, readHistory } from './burn'
-import { hmmss, label, partOf, readingLine, short, sorted } from './format'
+import { countdown, duration, hmmss, label, partOf, readingLine, short, sorted } from './format'
 
 const reading = atom({ plugin: 'token-watch', key: 'reading' } as const, null)
 const isShown = atom({ plugin: 'token-watch', key: 'isShown' } as const, true)
@@ -144,7 +156,16 @@ const globalSettings = atom({ plugin: 'token-watch', key: 'globalSettings' } as 
 const override = atom({ plugin: 'token-watch', key: 'override' } as const, {})
 const scope = atom({ plugin: 'token-watch', key: 'scope' } as const, 'session')
 const openSections = atom({ plugin: 'token-watch', key: 'openSections' } as const, [])
+const ctxAlerted = atom({ plugin: 'token-watch', key: 'ctxAlerted' } as const, [])
 const history = atom({ plugin: 'token-watch', key: 'history' } as const, {})
+
+// Keep-warm's modes as the panel names and explains them.
+const WARM_MODE_NAMES: Record<WarmMode, string> = { pings: 'Pings', notify: 'Notify', both: 'Both' }
+const WARM_MODE_NOTES: Record<WarmMode, string> = {
+  pings: 'Pings keep the cache warm while you are away.',
+  notify: 'No pings: a notification before the cache expires, free. Stays on across prompts.',
+  both: 'Pings, and a notification before the first ping of each idle spell.',
+}
 
 // The settings panel's pane id, and its width when docked beside the transcript.
 const SETTINGS = 'token-watch-settings'
@@ -194,6 +215,7 @@ let snapshotPath: string | null = null
 let lastWriteMs = 0
 let lastKey = ''
 let pingTimer: Timer | null = null
+let notifyTimer: Timer | null = null
 let pingOut: { seq: number; sentAt: number } | null = null
 let pingSeq = 0
 
@@ -291,8 +313,11 @@ export const register: Register = (on, options) => {
   on('prompt.submit', async ($, e, next) => {
     // The person is back: keep-warm has done its job. A delivery from a
     // notification, a schedule, a peer or a plugin is not the person.
-    if (!BACKGROUND_ORIGINS.has(e.origin.kind) && (await read($, keepWarm)).on) {
+    // A reminder costs nothing and stays on: it is for the next idle spell.
+    const isReminder = (await read($, settings)).warm.mode === 'notify'
+    if (!BACKGROUND_ORIGINS.has(e.origin.kind) && !isReminder && (await read($, keepWarm)).on) {
       await stopKeepWarm($, null)
+      await writeSnapshot($)
     }
     return next(e)
   })
@@ -440,7 +465,9 @@ export const register: Register = (on, options) => {
         </Button>
       )
     // A section's heading, which opens and closes it, and its body indented.
-    const section = (id: string, title: string, body: () => unknown) => {
+    // A sub-section's heading is plain, and carries its row's override
+    // marker, so an override shows with the section closed.
+    const section = (id: string, title: string, body: () => unknown, options: { isSub?: true; extra?: unknown } = {}) => {
       const isOpen = open.includes(id)
       return (
         <Box key={id} flexDirection="column">
@@ -448,7 +475,8 @@ export const register: Register = (on, options) => {
             <Button key={`section-${id}`} plain={plain} onPress={() => void toggleSection($, id)}>
               {wrap(isOpen ? '\u25be' : '\u25b8')}
             </Button>
-            <Text bold>{title}</Text>
+            <Text bold={!options.isSub || undefined}>{title}</Text>
+            {(options.extra ?? null) as never}
           </Box>
           {isOpen && (
             <Box flexDirection="column" paddingLeft={2}>
@@ -458,28 +486,58 @@ export const register: Register = (on, options) => {
         </Box>
       )
     }
-    // A row of the three views, each toggled on its own.
-    const views = (title: string, path: Path, key: string) => (
-      <Box key={key} flexDirection="column">
-        <Box flexDirection="row" columnGap={1}>
-          <Text>{title}</Text>
-          {marker(path)}
-        </Box>
-        <Box flexDirection="row" columnGap={1} flexWrap="wrap" paddingLeft={2}>
-          {VIEWS.map(v => {
-            const isOn = getAt(shown, [...path, v]) === true
-            return (
-              <Box key={v} flexDirection="row" columnGap={1} flexShrink={0}>
-                <Button key={`${key}-${v}`} plain={plain} onPress={() => void setSetting($, [...path, v], !isOn)}>
-                  {mark(isOn)}
-                </Button>
-                <Text>{VIEW_NAMES[v]}</Text>
-              </Box>
-            )
-          })}
-        </Box>
+    // The three views, each toggled on its own.
+    const viewChoices = (path: Path, key: string) => (
+      <Box flexDirection="row" columnGap={1} flexWrap="wrap">
+        {VIEWS.map(v => {
+          const isOn = getAt(shown, [...path, v]) === true
+          return (
+            <Box key={v} flexDirection="row" columnGap={1} flexShrink={0}>
+              <Button key={`${key}-${v}`} plain={plain} onPress={() => void setSetting($, [...path, v], !isOn)}>
+                {mark(isOn)}
+              </Button>
+              <Text>{VIEW_NAMES[v]}</Text>
+            </Box>
+          )
+        })}
       </Box>
     )
+    const views = (id: string, title: string, path: Path, key: string) =>
+      section(id, title, () => viewChoices(path, key), { isSub: true, extra: marker(path) })
+    // A part's alert level: [-]80%[+], 50% to 95% in steps of 5, then 99%,
+    // then Off; off, the [-] becomes Enable (to 99%) and there is no [+].
+    // A usage window's alert is every session's (the window is the account's),
+    // so only every session's scope shows it.
+    const alerts = (id: string, part: keyof typeof shown.alert) => {
+      const isShared = isGlobalOnly(['alert', part])
+      if (isShared && !isGlobal) return null
+      const level = shown.alert[part]
+      const step = (by: 1 | -1) => void setSetting($, ['alert', part], stepAlert(level, by))
+      return section(
+        id,
+        'Alerts',
+        () => (
+          <Box flexDirection="row" columnGap={isTerminal ? 0 : 1}>
+            {level === null ? (
+              <Button key={`alert-${part}-enable`} plain={plain} onPress={() => step(-1)}>
+                {wrap('Enable')}
+              </Button>
+            ) : (
+              <Button key={`alert-${part}-down`} plain={plain} dimColor={level <= 50} onPress={() => step(-1)}>
+                {isTerminal ? '[-]' : '\u2212'}
+              </Button>
+            )}
+            <Text>{level === null ? 'Off' : `${level}%`}</Text>
+            {level !== null && (
+              <Button key={`alert-${part}-up`} plain={plain} onPress={() => step(1)}>
+                {isTerminal ? '[+]' : '+'}
+              </Button>
+            )}
+          </Box>
+        ),
+        { isSub: true, extra: isShared ? null : marker(['alert', part]) },
+      )
+    }
     // A stepper: label, [-], value, [+], dimmed at the ends.
     const stepper = (key: string, title: string, width: number, value: string, atMin: boolean, atMax: boolean, by: (d: 1 | -1) => void, over: Path) => (
       <Box key={key} flexDirection="row" columnGap={1}>
@@ -499,37 +557,46 @@ export const register: Register = (on, options) => {
     const usage = (part: UsagePart, name: string) => {
       const pace = shown.pace[part]
       const windows = PACE_WINDOWS[part]
-      return section(`usage-${part}`, name, () => (
+      const id = `usage-${part}`
+      return section(id, name, () => (
         <Box flexDirection="column">
-          {views('Show on band', ['show', part], `show-${part}`)}
-          {views('Burn forecast', ['pace', part, 'forecast'], `forecast-${part}`)}
-          {views('Burn rate', ['pace', part, 'show'], `pace-${part}`)}
-          <Box flexDirection="column" paddingLeft={2}>
-            {stepper(
-              `window-${part}`,
-              'Window:',
-              paceWidth,
-              windowText(pace.windowMin),
-              pace.windowMin <= windows[0]!,
-              pace.windowMin >= windows[windows.length - 1]!,
-              by => void setSetting($, ['pace', part, 'windowMin'], stepIn(windows, pace.windowMin, by)),
-              ['pace', part, 'windowMin'],
-            )}
-            <Box flexDirection="row" columnGap={1}>
-              <Box width={paceWidth} flexShrink={0}>
-                <Text>Unit:</Text>
-              </Box>
-              {PACE_UNITS[part].map(unit => (
-                <Box key={unit} flexDirection="row" columnGap={1} flexShrink={0}>
-                  <Button key={`unit-${part}-${unit}`} plain={plain} onPress={() => void setSetting($, ['pace', part, 'unit'], unit)}>
-                    {choice(pace.unit === unit)}
-                  </Button>
-                  <Text>{`%/${unit}`}</Text>
+          {views(`${id}-show`, 'Show on band', ['show', part], `show-${part}`)}
+          {alerts(`${id}-alert`, part)}
+          {section(
+            `${id}-pace`,
+            'Burn rate',
+            () => (
+              <Box flexDirection="column">
+                {viewChoices(['pace', part, 'show'], `pace-${part}`)}
+                {stepper(
+                  `window-${part}`,
+                  'Window:',
+                  paceWidth,
+                  windowText(pace.windowMin),
+                  pace.windowMin <= windows[0]!,
+                  pace.windowMin >= windows[windows.length - 1]!,
+                  by => void setSetting($, ['pace', part, 'windowMin'], stepIn(windows, pace.windowMin, by)),
+                  ['pace', part, 'windowMin'],
+                )}
+                <Box flexDirection="row" columnGap={1}>
+                  <Box width={paceWidth} flexShrink={0}>
+                    <Text>Unit:</Text>
+                  </Box>
+                  {PACE_UNITS[part].map(unit => (
+                    <Box key={unit} flexDirection="row" columnGap={1} flexShrink={0}>
+                      <Button key={`unit-${part}-${unit}`} plain={plain} onPress={() => void setSetting($, ['pace', part, 'unit'], unit)}>
+                        {choice(pace.unit === unit)}
+                      </Button>
+                      <Text>{`%/${unit}`}</Text>
+                    </Box>
+                  ))}
+                  {marker(['pace', part, 'unit'])}
                 </Box>
-              ))}
-              {marker(['pace', part, 'unit'])}
-            </Box>
-          </Box>
+              </Box>
+            ),
+            { isSub: true, extra: marker(['pace', part, 'show']) },
+          )}
+          {views(`${id}-forecast`, 'Burn forecast', ['pace', part, 'forecast'], `forecast-${part}`)}
         </Box>
       ))
     }
@@ -589,33 +656,86 @@ export const register: Register = (on, options) => {
             {usage('other', 'OTH')}
           </Box>
         ))}
-        {section('context', 'Context', () => views('Show on band', ['show', 'CTX'], 'show-CTX'))}
-        {section('cache', 'Cache', () => (
+        {section('context', 'Context', () => (
           <Box flexDirection="column">
-            {views('Show on band', ['show', 'TTL'], 'show-TTL')}
-            <Text dimColor wrap="wrap">
-              Hidden in every view, keep-warm turns off.
-            </Text>
-            <Text>{`Limits (${ttl} TTL)`}</Text>
-            <Box flexDirection="column" paddingLeft={2}>
-              {(['pings', 'hours'] as const).map(which => {
-                const value = shown.caps[ttl][which]
-                const { min, max, step } = CAP_LIMITS[ttl][which]
-                return stepper(
-                  which,
-                  which === 'pings' ? 'Pings:' : 'Hours:',
-                  capWidth,
-                  String(value),
-                  value <= min,
-                  value >= max,
-                  by => void setSetting($, ['caps', ttl, which], Math.min(max, Math.max(min, value + by * step))),
-                  ['caps', ttl, which],
-                )
-              })}
-            </Box>
-            <Text dimColor wrap="wrap">
-              {`Defaults: ${DEFAULT_CAPS[ttl].pings} pings or ${DEFAULT_CAPS[ttl].hours} hours. A running keep-warm already past a new cap stops.`}
-            </Text>
+            {views('context-show', 'Show on band', ['show', 'CTX'], 'show-CTX')}
+            {alerts('context-alert', 'CTX')}
+          </Box>
+        ))}
+        {section('cache', 'Cache time', () => (
+          <Box flexDirection="column">
+            {section(
+              'cache-show',
+              'Show on band',
+              () => (
+                <Box flexDirection="column">
+                  {viewChoices(['show', 'TTL'], 'show-TTL')}
+                  <Text dimColor wrap="wrap">
+                    Hidden in every view, keep-warm turns off.
+                  </Text>
+                </Box>
+              ),
+              { isSub: true, extra: marker(['show', 'TTL']) },
+            )}
+            {section(
+              'cache-warm',
+              'Keep-warm',
+              () => (
+                <Box flexDirection="column">
+                  <Box flexDirection="row" columnGap={1} flexWrap="wrap">
+                    {WARM_MODES.map(mode => (
+                      <Box key={mode} flexDirection="row" columnGap={1} flexShrink={0}>
+                        <Button key={`warm-${mode}`} plain={plain} onPress={() => void setSetting($, ['warm', 'mode'], mode)}>
+                          {choice(shown.warm.mode === mode)}
+                        </Button>
+                        <Text>{WARM_MODE_NAMES[mode]}</Text>
+                      </Box>
+                    ))}
+                  </Box>
+                  <Text dimColor wrap="wrap">
+                    {WARM_MODE_NOTES[shown.warm.mode]}
+                  </Text>
+                  {shown.warm.mode !== 'pings' &&
+                    stepper(
+                      'lead',
+                      'Remind:',
+                      paceWidth,
+                      `${shown.warm.lead[ttl]} min before`,
+                      shown.warm.lead[ttl] <= NOTIFY_LEADS[ttl][0]!,
+                      shown.warm.lead[ttl] >= NOTIFY_LEADS[ttl][NOTIFY_LEADS[ttl].length - 1]!,
+                      by => void setSetting($, ['warm', 'lead', ttl], stepIn(NOTIFY_LEADS[ttl], shown.warm.lead[ttl], by)),
+                      ['warm', 'lead', ttl],
+                    )}
+                </Box>
+              ),
+              { isSub: true, extra: marker(['warm', 'mode']) },
+            )}
+            {section(
+              'cache-limits',
+              `Limits (${ttl} TTL)`,
+              () => (
+                <Box flexDirection="column">
+                  {(['pings', 'hours'] as const).map(which => {
+                    const value = shown.caps[ttl][which]
+                    const { min, max, step } = CAP_LIMITS[ttl][which]
+                    return stepper(
+                      which,
+                      which === 'pings' ? 'Pings:' : 'Hours:',
+                      capWidth,
+                      String(value),
+                      value <= min,
+                      value >= max,
+                      by => void setSetting($, ['caps', ttl, which], Math.min(max, Math.max(min, value + by * step))),
+                      ['caps', ttl, which],
+                    )
+                  })}
+                  <Text dimColor wrap="wrap">
+                    {`Defaults: ${DEFAULT_CAPS[ttl].pings} pings or ${DEFAULT_CAPS[ttl].hours} hours. A running keep-warm already past a new cap stops.`}
+                  </Text>
+                </Box>
+              ),
+              { isSub: true },
+            )}
           </Box>
         ))}
         <Text dimColor wrap="wrap">
@@ -656,6 +776,7 @@ export const register: Register = (on, options) => {
       paceHidden: paceHiddenIn(inForce, bandView),
       forecastHidden: forecastHiddenIn(inForce, bandView),
       cap: await currentCap($),
+      warmMode: inForce.warm.mode,
       pace: await paceOf($, windows, clock),
     }
 
@@ -759,6 +880,7 @@ async function takeReading($: EngineInterface, isFresh = false) {
     return
   }
   await settleTtl($)
+  await checkAlerts($)
   await writeSnapshot($)
 }
 
@@ -889,6 +1011,8 @@ async function applySettings($: EngineInterface) {
   if (JSON.stringify(await read($, settings)) !== JSON.stringify(next)) await update($, settings, () => next)
   if (isCacheHidden(next) && (await read($, keepWarm)).on) await stopKeepWarm($, null)
   await holdToCaps($)
+  // A mode or a lead that changed arms the timers again.
+  if ((await read($, keepWarm)).on) await schedule($)
 }
 
 // This session's own settings saved under its id, with when, so ones left by
@@ -930,11 +1054,12 @@ async function toggleSection($: EngineInterface, id: string) {
   await update($, openSections, open => (open.includes(id) ? open.filter(s => s !== id) : [...open, id]))
 }
 
-// One leaf set in the scope the panel edits. In this session's scope, a leaf
-// set to the global value no longer overrides it.
+// One leaf set in the scope the panel edits, or in the global settings for a
+// leaf only they hold. In this session's scope, a leaf set to the global
+// value no longer overrides it.
 async function setSetting($: EngineInterface, path: Path, value: unknown) {
   const global = await read($, globalSettings)
-  if (await editsGlobal($)) {
+  if (isGlobalOnly(path) || (await editsGlobal($))) {
     const next = setAt(global, path, value)
     await update($, globalSettings, () => next)
     await $.store.set('settings', next)
@@ -985,7 +1110,7 @@ async function paceOf($: EngineInterface, windows: Limit[], now: number): Promis
 // stops now, saying why, rather than showing "7/5" until its next ping.
 async function holdToCaps($: EngineInterface) {
   const k = await read($, keepWarm)
-  if (k.on) {
+  if (k.on && (await read($, settings)).warm.mode !== 'notify') {
     await tick($)
     const reached = capReached(k, await currentCap($), await read($, nowMs))
     if (reached !== null) await stopKeepWarm($, reached)
@@ -1032,6 +1157,7 @@ async function refreshCaps($: EngineInterface) {
 // reason to give.
 async function stopKeepWarm($: EngineInterface, text: string | null) {
   stopPingTimer()
+  stopNotifyTimer()
   const now = await read($, nowMs)
   await update($, keepWarm, k => ({ ...k, on: false, note: text === null ? null : { at: now, text } }))
 }
@@ -1041,6 +1167,11 @@ function stopPingTimer() {
   pingTimer = null
 }
 
+function stopNotifyTimer() {
+  notifyTimer?.cancel()
+  notifyTimer = null
+}
+
 // Arms the next ping, unless one is out (its answer arms the next).
 async function schedule($: EngineInterface) {
   stopPingTimer()
@@ -1048,23 +1179,64 @@ async function schedule($: EngineInterface) {
   await arm($)
 }
 
-// Arms the next ping: a lead time before the believed expiry. Nothing is
-// armed while keep-warm is off, before the first response, while a turn runs
-// (its end arms it) or once the cache has gone cold (the heartbeat then turns
-// keep-warm off).
+// Arms the next ping, a lead time before the believed expiry, and the
+// reminder by the mode: in Notify, the reminder alone, its lead before the
+// expiry; in Both, the ping and, before the first ping of an idle spell, the
+// reminder its lead before that. Nothing is armed while keep-warm is off,
+// before the first response, while a turn runs (its end arms it) or once the
+// cache has gone cold (the heartbeat then turns keep-warm off, save a
+// reminder, which waits for the next response).
 async function arm($: EngineInterface) {
   stopPingTimer()
+  stopNotifyTimer()
   const k = await read($, keepWarm)
   const c = await read($, cache)
   if (!k.on || c.warmUntil === null || (await read($, working))) return
-  if (isCacheHidden(await read($, settings))) {
+  const inForce = await read($, settings)
+  if (isCacheHidden(inForce)) {
     await stopKeepWarm($, null)
     return await writeSnapshot($)
   }
   const now = await $.clock.now()
   if (now >= c.warmUntil) return
-  const wait = Math.max(MIN_PING_WAIT_MS, c.warmUntil - leadMs(c.windowMs) - now)
-  pingTimer = $.clock.after(wait, () => void ping($))
+  const { mode } = inForce.warm
+  const lead = inForce.warm.lead[c.ttl] * 60_000
+  if (mode === 'notify') {
+    if (k.notifiedFor !== c.warmUntil) {
+      notifyTimer = $.clock.after(Math.max(MIN_PING_WAIT_MS, c.warmUntil - lead - now), () => void remind($))
+    }
+    return
+  }
+  const pingAt = c.warmUntil - leadMs(c.windowMs)
+  pingTimer = $.clock.after(Math.max(MIN_PING_WAIT_MS, pingAt - now), () => void ping($))
+  const isFirstOfSpell = k.lastPing === null || (c.lastResponseAt !== null && k.lastPing.at < c.lastResponseAt)
+  if (mode === 'both' && isFirstOfSpell && k.notifiedFor !== c.lastResponseAt && pingAt - lead > now) {
+    notifyTimer = $.clock.after(pingAt - lead - now, () => void remind($))
+  }
+}
+
+// The reminder: in Notify, the countdown is about to run out; in Both, a
+// ping is about to go out. One notification, and noted against what it was
+// for, so it is not sent again.
+async function remind($: EngineInterface) {
+  notifyTimer = null
+  try {
+    const k = await read($, keepWarm)
+    const c = await read($, cache)
+    const mode = (await read($, settings)).warm.mode
+    if (!k.on || c.warmUntil === null || mode === 'pings') return
+    await tick($)
+    const now = await read($, nowMs)
+    const text =
+      mode === 'notify'
+        ? `The prompt cache expires in ${duration(c.warmUntil - now)}. Send a message to keep it warm.`
+        : `Token Watch pings in ${duration(c.warmUntil - leadMs(c.windowMs) - now)} to keep the prompt cache warm. Send a message to keep it yourself.`
+    await $.ui.notify(text, { title: 'Token Watch' }).catch(() => null)
+    const notifiedFor = mode === 'notify' ? c.warmUntil : c.lastResponseAt
+    await update($, keepWarm, kw => ({ ...kw, notifiedFor, note: { at: now, text: 'reminder sent' } }))
+  } catch {
+    // Nothing to show; the next countdown arms another.
+  }
 }
 
 // Whether a ping is out and not yet given up on (after PING_LOST_MS): this
@@ -1096,6 +1268,7 @@ async function ping($: EngineInterface) {
     const k = await read($, keepWarm)
     const c = await read($, cache)
     if (!k.on || c.warmUntil === null || (await read($, working))) return
+    if ((await read($, settings)).warm.mode === 'notify') return
     await tick($)
     const sentAt = await read($, nowMs)
     // While the TTL row is hidden keep-warm stays off: however it came to be
@@ -1250,6 +1423,7 @@ async function writeSnapshot($: EngineInterface, force = false) {
         warm: c.warmUntil !== null && now < c.warmUntil,
         keepWarm: {
           on: k.on,
+          mode: (await read($, settings)).warm.mode,
           pings: k.pings,
           maxPings: cap.pings,
           startedAt: k.startedAt === null ? null : iso(k.startedAt),
@@ -1283,7 +1457,8 @@ async function heartbeat($: EngineInterface) {
     const k = await read($, keepWarm)
     const c = await read($, cache)
     const now = await read($, nowMs)
-    const isCold = k.on && c.warmUntil !== null && now >= c.warmUntil && !(await read($, working))
+    const isReminder = (await read($, settings)).warm.mode === 'notify'
+    const isCold = k.on && !isReminder && c.warmUntil !== null && now >= c.warmUntil && !(await read($, working))
     if (isCold && !(await isPingOut($, now))) {
       await stopKeepWarm($, 'stopped: cache went cold')
     } else if (pingTimer === null) {
@@ -1303,6 +1478,49 @@ async function heartbeat($: EngineInterface) {
   }
 }
 
+// Alerts: a notification the first time a part crosses a level it alerts at.
+// A usage window's levels are noted in the store against its reset time, so
+// one session says it once a window period; the context's in this session,
+// cleared once it falls back under them (a compaction).
+async function checkAlerts($: EngineInterface) {
+  try {
+    const inForce = await read($, settings)
+    const now = await read($, nowMs)
+    // A part's level as a list: its one level, or none while it is off.
+    const levelsOn = (part: keyof typeof inForce.alert) => {
+      const level = inForce.alert[part]
+      return level === null ? [] : [level]
+    }
+    const alerted = ((await $.store.get('alerted')) ?? {}) as Record<string, { resetsAt: string | null; levels: number[] }>
+    let next = alerted
+    for (const w of current(await read($, limits), now)) {
+      const resetsAt = w.resetsAt ?? null
+      const kept = alerted[w.kind]?.resetsAt === resetsAt ? alerted[w.kind]!.levels : []
+      const crossed = levelsOn(partOf(w)).filter(level => w.percentUsed >= level && !kept.includes(level))
+      if (crossed.length === 0) continue
+      const left = countdown(w.resetsAt, now)
+      await notify($, `${label(w)} at ${Math.round(w.percentUsed)}%${left ? `, resets in ${left}` : ''}.`)
+      next = { ...next, [w.kind]: { resetsAt, levels: [...kept, ...crossed] } }
+    }
+    if (next !== alerted) await $.store.set('alerted', next)
+    const latest = await read($, reading)
+    if (latest !== null) {
+      const percent = Math.round((latest.total / latest.window) * 100)
+      const kept = (await read($, ctxAlerted)).filter(level => percent >= level)
+      const crossed = levelsOn('CTX').filter(level => percent >= level && !kept.includes(level))
+      if (crossed.length > 0) await notify($, `Context at ${percent}% (${short(latest.total)} of ${short(latest.window)}).`)
+      const levels = [...kept, ...crossed]
+      if (JSON.stringify(levels) !== JSON.stringify(await read($, ctxAlerted))) await update($, ctxAlerted, () => levels)
+    }
+  } catch {
+    // Checked again at the next reading.
+  }
+}
+
+async function notify($: EngineInterface, text: string) {
+  await $.ui.notify(text, { title: 'Token Watch' }).catch(() => null)
+}
+
 // The usage windows another session reported more recently than this one
 // (its responses carry them, an idle session gets none), and the samples
 // every session adds, taken from the store. The windows are the account's,
@@ -1313,6 +1531,7 @@ async function adoptUsage($: EngineInterface) {
   if (typeof at === 'number' && at > (await read($, limitsAt)) && Array.isArray(saved)) {
     await update($, limits, () => saved as Limit[])
     await update($, limitsAt, () => at)
+    await checkAlerts($)
   }
   const kept = readHistory(await $.store.get('history'))
   if (JSON.stringify(kept) !== JSON.stringify(await read($, history))) await update($, history, () => kept)

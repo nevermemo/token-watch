@@ -44,17 +44,24 @@ const TURN_USAGE = { ...LAST_RESPONSE, model: 'claude-opus-5-5' }
 const MESSAGE: SessionMessage = { role: 'user', text: 'hi', toolUses: [] }
 
 // `apiUsage`: the last response's counts, which the band reads the prompt's
-// size from; null before one came back.
-const usage = (rateLimits: SessionRateLimit[], apiUsage: ModelUsage | null = null) => ({
+// size from; null before one came back. `total`: the context's size, 212.2k
+// unless a test grows it (the messages row takes the difference).
+const usage = (rateLimits: SessionRateLimit[], apiUsage: ModelUsage | null = null, total = 212_200) => ({
   startedAt: 0,
   rateLimits,
   context: {
-    tokens: 212_200,
+    tokens: total,
     window: 1_000_000,
     percent: 21,
     breakdown: {
-      categories: ROWS.map(([name, tokens, kind]) => ({ name, tokens, kind, color: 'inactive', isDeferred: false })),
-      totalTokens: 212_200,
+      categories: ROWS.map(([name, tokens, kind]) => ({
+        name,
+        tokens: name === 'Messages' ? tokens + total - 212_200 : tokens,
+        kind,
+        color: 'inactive',
+        isDeferred: false,
+      })),
+      totalTokens: total,
       maxTokens: 1_000_000,
       rawMaxTokens: 1_000_000,
       autocompactSource: 'auto' as const,
@@ -146,6 +153,8 @@ type Boot = {
   apiUsage?: ModelUsage
   // Why no surface places a pane; every pane is placed by default.
   paneUnplaced?: string
+  // The context's size, which a test may grow between readings.
+  context?: { total: number }
 }
 
 type Write = { path: string; text: string }
@@ -179,7 +188,15 @@ async function boot($: Engine, on: On, surface: 'terminal' | 'desktop' | null, r
   const forks: string[] = []
   const opens: PaneOpenArgs[] = []
   const closes: string[] = []
-  const saved = new Map<string, unknown>(Object.entries(options.stored ?? {}))
+  const notes: string[] = []
+  // Most tests here are about pings, so keep-warm is in Pings mode (the
+  // default is Notify) unless a test brings saved settings of its own,
+  // 1.3.0's keys included.
+  const stored = options.stored ?? {}
+  const bringsSettings = 'settings' in stored || 'hidden' in stored || 'caps' in stored
+  const saved = new Map<string, unknown>(
+    Object.entries(bringsSettings ? stored : { ...stored, settings: { warm: { mode: 'pings' } } }),
+  )
   const clock = mock.clock(on, { now: NOW })
   mock.env(on, options.env ?? { USERPROFILE: 'C:/Users/test' })
   on('store.get', ($, e) => ({ value: saved.get(e.key) }))
@@ -211,7 +228,11 @@ async function boot($: Engine, on: On, surface: 'terminal' | 'desktop' | null, r
     const { Box, Text } = $.ui.resolve(e)
     return options.beneath ? <Text>{options.beneath}</Text> : <Box />
   })
-  on('session.usage', () => ({ value: usage(rateLimits, options.apiUsage ?? null) }))
+  on('session.usage', () => ({ value: usage(rateLimits, options.apiUsage ?? null, options.context?.total) }))
+  on('ui.notify', ($, e) => {
+    notes.push(e.text)
+    return { value: { isSent: true, channel: 'terminal_bell' } }
+  })
   on('session.surfaces', () => ({ value: options.surfaces ?? (surface ? [surface] : []) }))
   on('session.id', () => ({ value: 'sess-1' }))
   on('session.cwd', () => ({ value: 'C:/proj' }))
@@ -234,13 +255,13 @@ async function boot($: Engine, on: On, surface: 'terminal' | 'desktop' | null, r
   })
   await $.session.start({ cwd: '.', surface, isInteractive: true })
 
-  return { writes, saved, clock, forks, opens, closes }
+  return { writes, saved, clock, forks, opens, closes, notes }
 }
 
 // `beneath`: text a mod beneath this one draws in the band, if any.
 // `stored`: what the mod's store holds from earlier sessions.
 async function start($: Engine, on: On, surface: Surface, rateLimits: SessionRateLimit[], beneath?: string, stored?: Record<string, unknown>, options: Boot = {}) {
-  const { writes, saved, clock, forks, opens, closes } = await boot($, on, surface, rateLimits, { ...options, beneath, stored })
+  const { writes, saved, clock, forks, opens, closes, notes } = await boot($, on, surface, rateLimits, { ...options, beneath, stored })
   const ui = await $.ui.mount<Surface, 'AbovePrompt'>({ ...BAND, surface })
   await ui.resize({ columns: 116, rows: 8, in: 'band' })
   const band = async () => JSON.stringify(await ui.drawn({ in: 'band' }))
@@ -248,7 +269,7 @@ async function start($: Engine, on: On, surface: Surface, rateLimits: SessionRat
   // The whole drawing, the settings button beside the band included.
   const tree = async () => JSON.stringify(await ui.drawn())
 
-  return { ui, band, tree, writes, saved, clock, forks, opens, closes }
+  return { ui, band, tree, writes, saved, clock, forks, opens, closes, notes }
 }
 
 // One main-thread turn, started and ended at the clock's time now.
@@ -1282,13 +1303,27 @@ const PANE = {
   props: { title: 'Token Watch', isFocused: false, bodyColumns: 52, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
 } as const
 
+// The sub-sections a section holds, opened with it by mountPanel.
+const SUBSECTIONS: Record<string, string[]> = {
+  'usage-5H': ['show', 'alert', 'forecast', 'pace'].map(sub => `usage-5H-${sub}`),
+  'usage-WK': ['show', 'alert', 'forecast', 'pace'].map(sub => `usage-WK-${sub}`),
+  'usage-other': ['show', 'alert', 'forecast', 'pace'].map(sub => `usage-other-${sub}`),
+  context: ['context-show', 'context-alert'],
+  cache: ['cache-show', 'cache-warm', 'cache-limits'],
+}
+
 // The settings panel mounted: with `scope: 'global'` switched to edit every
 // session's settings (it opens on this session's), and the sections in
-// `open` opened, in order ('usage' before 'usage-5H').
+// `open` opened, in order ('usage' before 'usage-5H'), each with its
+// sub-sections (any the scope does not draw, such as a usage window's alerts
+// in this session's, left alone).
 async function mountPanel($: Engine, surface: Surface, options: { scope?: 'global'; open?: string[] } = {}) {
   const pane = await $.ui.mount<Surface, 'Pane'>({ ...PANE, surface })
   if (options.scope === 'global') await pane.press({ key: 'scope-global' })
-  for (const id of options.open ?? []) await pane.press({ key: `section-${id}` })
+  for (const id of options.open ?? []) {
+    await pane.press({ key: `section-${id}` })
+    for (const sub of SUBSECTIONS[id] ?? []) await pane.press({ key: `section-${sub}` }).catch(() => {})
+  }
   const drawn = async () => JSON.stringify(await pane.drawn())
   return { pane, drawn }
 }
@@ -1324,6 +1359,9 @@ describe('settings panel', () => {
       expect(await drawn()).not.toContain('"key":"show-5H-plain"')
       await pane.press({ key: 'section-usage' })
       await pane.press({ key: 'section-usage-5H' })
+      // Each row is a section of its own too.
+      expect(await drawn()).not.toContain('"key":"show-5H-plain"')
+      await pane.press({ key: 'section-usage-5H-show' })
       for (const v of ['plain', 'bars', 'expanded']) expect(await drawn()).toContain(toggle(surface, `show-5H-${v}`, true))
       expect(await drawn()).toContain('OTH')
 
@@ -1534,7 +1572,7 @@ describe('settings scopes', () => {
       expect(await drawn()).toContain(`"key":"scope-global","label":"${off1}"`)
       await pane.press({ key: 'show-5H-expanded' })
       expect(saved.get(SESSION_KEY)).toMatchObject({ settings: { show: { '5H': { expanded: false } } } })
-      expect(saved.has('settings')).toBe(false)
+      expect(saved.get('settings')).toEqual({ warm: { mode: 'pings' } })
       expect(await band()).not.toContain('"5H"')
       expect(await drawn()).toContain('"key":"reset-show-5H"')
       await pane.press({ key: 'reset-show-5H' })
@@ -1597,7 +1635,7 @@ describe('settings scopes', () => {
     const { pane } = await mountPanel($, 'terminal', { open: ['cache'] })
     await pane.press({ key: 'pings-up' })
     expect(saved.get(SESSION_KEY)).toMatchObject({ settings: { caps: { '5m': { pings: 35 } } } })
-    expect(saved.has('settings')).toBe(false)
+    expect(saved.get('settings')).toEqual({ warm: { mode: 'pings' } })
     await ui.press({ key: 'keep-warm' })
     expect(await band()).toContain('Pings: 0/35  Time: 00:00 / 2:00:00')
     await pane.press({ key: 'reset-caps-5m-pings' })
@@ -1662,9 +1700,12 @@ const fiveHourAt = (limits: SessionRateLimit[], percentUsed: number) => {
 
 describe('burn rate', () => {
   for (const surface of ['terminal', 'desktop'] as const) {
-    test(`${surface}: a window's pace and how long until it fills, or Safe; the collapsed line shows the pace`, async ($, on) => {
+    test(`${surface}: a window's pace and how long until it fills, or Safe; the collapsed line shows the pace where it is on`, async ($, on) => {
       const limits = [...RATE_LIMITS]
-      const { ui, band, clock } = await start($, on, surface, limits)
+      // The pace shows in the table alone by default; here in the collapsed view too.
+      const { ui, band, clock } = await start($, on, surface, limits, undefined, {
+        settings: { pace: { '5H': { show: { bars: true } } } },
+      })
       await clock.advance(10 * MINUTE)
       fiveHourAt(limits, 67.4)
       await $.session.measure(MEASURE)
@@ -1673,7 +1714,7 @@ describe('burn rate', () => {
       const expanded = await band()
       expect(expanded).toContain('"30%/h"')
       expect(expanded).toContain('"color":"#e06c6c"},"children":["1h 05m"]')
-      expect(expanded).toContain('"0.0%/day"')
+      expect(expanded).toContain('"0.0%/h"')
       expect(expanded).toContain('"color":"#8fd18f"},"children":["Safe"]')
       // The collapsed line: the pace, and by default no forecast.
       await ui.pointer(rightClick)
@@ -1732,8 +1773,8 @@ describe('burn rate', () => {
     expect(await drawn()).toContain('"6 h"')
     for (let i = 0; i < 3; i++) await pane.press({ key: 'window-WK-up' })
     expect(await drawn()).toContain('"24 h"')
-    expect(await drawn()).toContain('"key":"unit-WK-day","label":"[●]"')
-    expect(await drawn()).toContain('"key":"unit-WK-h"')
+    expect(await drawn()).toContain('"key":"unit-WK-h","label":"[●]"')
+    expect(await drawn()).toContain('"key":"unit-WK-day"')
     expect(await drawn()).not.toContain('"key":"unit-WK-min"')
   })
 
@@ -1790,14 +1831,16 @@ describe('burn rate', () => {
 
   test('narrow, the collapsed line narrows its meters, then drops them, then the paces; the table drops its pace columns', async ($, on) => {
     const limits = [...RATE_LIMITS]
-    const { ui, band, clock } = await start($, on, 'terminal', limits)
+    const { ui, band, clock } = await start($, on, 'terminal', limits, undefined, {
+      settings: { pace: { '5H': { show: { bars: true } }, WK: { show: { bars: true } } } },
+    })
     await clock.advance(10 * MINUTE)
     fiveHourAt(limits, 67.4)
     await $.session.measure(MEASURE)
     await ui.resize({ columns: 69, rows: 8, in: 'band' })
     expect(await band()).not.toContain('%/h')
     await ui.pointer(rightClick)
-    // In cells: 49 without the paces (15) and the meters (22, 14 or 10 for
+    // In cells: 49 without the paces (13) and the meters (22, 14 or 10 for
     // two), the context bar keeping 8.
     const meters = (width: number) => `"width":${width},"height":1,"flexDirection":"row","alignItems":"center","flexShrink":0`
     await ui.resize({ columns: 150, rows: 8, in: 'band' })
@@ -1823,7 +1866,7 @@ describe('burn rate', () => {
     const { pane, drawn } = await mountPanel($, 'terminal', { open: ['usage', 'usage-5H'] })
     await pane.press({ key: 'unit-5H-min' })
     expect(saved.get(SESSION_KEY)).toMatchObject({ settings: { pace: { '5H': { unit: 'min' } } } })
-    expect(saved.has('settings')).toBe(false)
+    expect(saved.get('settings')).toEqual({ warm: { mode: 'pings' } })
     await pane.press({ key: 'reset-pace-5H-unit' })
     expect(saved.has(SESSION_KEY)).toBe(false)
     await pane.press({ key: 'scope-global' })
@@ -1863,6 +1906,168 @@ describe('usage across sessions', () => {
     await $.session.measure(MEASURE)
     expect(saved.get('limitsAt')).toBe(NOW + MINUTE)
     expect(saved.get('limits')).toMatchObject([{ kind: 'seven_day' }, { kind: 'five_hour', percentUsed: 62.4 }])
+  })
+})
+
+// The defaults, as a test brings them (the fixture's own store is in Pings mode).
+const DEFAULTS = { settings: {} }
+
+describe('notify and alerts', () => {
+  for (const surface of ['terminal', 'desktop'] as const) {
+    test(`${surface}: keep-warm reminds by default: Remind Me, then Reminding in green once on, with no caps`, async ($, on) => {
+      const { ui, band } = await start($, on, surface, RATE_LIMITS, undefined, DEFAULTS)
+      await turn($)
+      expect(await band()).toContain(chipOf(surface, 'keep-warm', warmLabel(surface, 'Remind Me'), CHIP_OFF))
+      await ui.press({ key: 'keep-warm' })
+      const after = await band()
+      expect(after).toContain(chipOf(surface, 'keep-warm', warmLabel(surface, 'Reminding'), CHIP_ON))
+      expect(after).not.toContain('Pings:')
+      expect(after).not.toContain(REFRESH_CAPS_KEY)
+    })
+  }
+
+  test('Notify: one notification its lead before the countdown runs out, no pings; again after the next response', async ($, on) => {
+    const { ui, clock, forks, notes, writes } = await start($, on, 'terminal', RATE_LIMITS, undefined, DEFAULTS, FIVE_M)
+    await turn($)
+    await ui.press({ key: 'keep-warm' })
+    // Five minutes, a minute's lead: at 4:00.
+    await clock.advance(4 * MINUTE - 1000)
+    expect(notes).toEqual([])
+    await clock.advance(1000)
+    expect(notes).toEqual(['The prompt cache expires in 1m. Send a message to keep it warm.'])
+    // Past the expiry: no ping, no second notification, and still on.
+    await clock.advance(5 * MINUTE)
+    expect(forks.length).toBe(0)
+    expect(notes.length).toBe(1)
+    expect(snapshotOf(writes).cache.keepWarm).toMatchObject({ on: true, mode: 'notify' })
+    // The next response starts a countdown, and its reminder.
+    await turn($, 't2')
+    await clock.advance(4 * MINUTE)
+    expect(notes.length).toBe(2)
+    expect(forks.length).toBe(0)
+  })
+
+  test('Notify stays on across a prompt from the person; Pings would not', async ($, on) => {
+    const { ui, band, writes } = await start($, on, 'terminal', RATE_LIMITS, undefined, DEFAULTS, FIVE_M)
+    await turn($)
+    await ui.press({ key: 'keep-warm' })
+    await $.prompt.submit({ text: 'back', wait: false, origin: { kind: 'composer' } })
+    expect(await band()).toContain(chipOf('terminal', 'keep-warm', warmLabel('terminal', 'Reminding'), CHIP_ON))
+    expect(snapshotOf(writes).cache.keepWarm).toMatchObject({ on: true, mode: 'notify' })
+  })
+
+  test('Both: pings, and one notification its lead before the first ping of an idle spell; a prompt stops it', async ($, on) => {
+    const { ui, clock, forks, notes, writes } = await start($, on, 'terminal', RATE_LIMITS, undefined, { settings: { warm: { mode: 'both' } } }, FIVE_M)
+    await turn($)
+    await ui.press({ key: 'keep-warm' })
+    // The first ping at 3:45; its reminder a minute before.
+    await clock.advance(PING_AT - MINUTE)
+    expect(notes).toEqual(['Token Watch pings in 1m to keep the prompt cache warm. Send a message to keep it yourself.'])
+    expect(forks.length).toBe(0)
+    await clock.advance(MINUTE)
+    expect(forks.length).toBe(1)
+    // The second ping of the spell comes without a reminder.
+    await clock.advance(PING_AT)
+    expect(forks.length).toBe(2)
+    expect(notes.length).toBe(1)
+    await $.prompt.submit({ text: 'back', wait: false, origin: { kind: 'composer' } })
+    expect(snapshotOf(writes).cache.keepWarm.on).toBe(false)
+  })
+
+  test("the panel's mode and reminder lead", async ($, on) => {
+    const { saved } = await start($, on, 'terminal', RATE_LIMITS, undefined, DEFAULTS, FIVE_M)
+    await turn($)
+    const { pane, drawn } = await mountPanel($, 'terminal', { scope: 'global', open: ['cache'] })
+    expect(await drawn()).toContain('Cache time')
+    expect(await drawn()).toContain('"key":"warm-notify","label":"[●]"')
+    expect(await drawn()).toContain('"1 min before"')
+    await pane.press({ key: 'lead-up' })
+    expect(saved.get('settings')).toMatchObject({ warm: { mode: 'notify', lead: { '5m': 2 } } })
+    await pane.press({ key: 'warm-pings' })
+    expect(saved.get('settings')).toMatchObject({ warm: { mode: 'pings' } })
+    // Pings has no reminder to time.
+    expect(await drawn()).not.toContain('"key":"lead-up"')
+  })
+
+  test("a usage window's alert: Enable to 99%, down in steps of 5 to 50%, past 99% Off; only in every session's scope", async ($, on) => {
+    const { saved } = await start($, on, 'terminal', RATE_LIMITS, undefined, DEFAULTS)
+    const { pane, drawn } = await mountPanel($, 'terminal', { open: ['usage', 'usage-5H'] })
+    expect(await drawn()).not.toContain('alert-5H')
+    // In every session's scope, its alert section, closed until opened.
+    await pane.press({ key: 'scope-global' })
+    await pane.press({ key: 'section-usage-5H-alert' })
+    expect(await drawn()).toContain('"key":"alert-5H-enable","label":"[Enable]"')
+    expect(await drawn()).not.toContain('"key":"alert-5H-up"')
+    await pane.press({ key: 'alert-5H-enable' })
+    expect(saved.get('settings')).toMatchObject({ alert: { '5H': 99 } })
+    await pane.press({ key: 'alert-5H-down' })
+    await pane.press({ key: 'alert-5H-down' })
+    expect(saved.get('settings')).toMatchObject({ alert: { '5H': 90 } })
+    for (let i = 0; i < 9; i++) await pane.press({ key: 'alert-5H-down' })
+    expect(saved.get('settings')).toMatchObject({ alert: { '5H': 50 } })
+    for (let i = 0; i < 10; i++) await pane.press({ key: 'alert-5H-up' })
+    expect(saved.get('settings')).toMatchObject({ alert: { '5H': 99 } })
+    await pane.press({ key: 'alert-5H-up' })
+    expect(saved.get('settings')).toMatchObject({ alert: { '5H': null } })
+    expect(await drawn()).toContain('"key":"alert-5H-enable"')
+  })
+
+  test('a usage alert: once a window period, noted in the store so other sessions stay quiet; a new period alerts again', async ($, on) => {
+    const limits = [...RATE_LIMITS]
+    const { saved, notes } = await start($, on, 'terminal', limits, undefined, { settings: { alert: { '5H': 80 } } })
+    fiveHourAt(limits, 82)
+    await $.session.measure(MEASURE)
+    expect(notes).toEqual(['5H at 82%, resets in 2h 14m.'])
+    fiveHourAt(limits, 85)
+    await $.session.measure(MEASURE)
+    expect(notes.length).toBe(1)
+    expect(saved.get('alerted')).toEqual({ five_hour: { resetsAt: FIVE_HOUR.resetsAt, levels: [80] } })
+    limits[1] = { kind: 'five_hour', percentUsed: 83, resetsAt: new Date(NOW + 5 * 60 * MINUTE).toISOString() }
+    await $.session.measure(MEASURE)
+    expect(notes.length).toBe(2)
+  })
+
+  test('another session already alerted for this period: this one stays quiet', async ($, on) => {
+    const limits = [...RATE_LIMITS]
+    const { notes } = await start($, on, 'terminal', limits, undefined, {
+      settings: { alert: { '5H': 80, WK: 50 } },
+      alerted: { five_hour: { resetsAt: FIVE_HOUR.resetsAt, levels: [80] } },
+    })
+    fiveHourAt(limits, 82)
+    limits[0] = { ...SEVEN_DAY, percentUsed: 55 }
+    await $.session.measure(MEASURE)
+    // 5H was said already; WK, not yet.
+    expect(notes).toEqual(['WK at 55%, resets in 3d 4h.'])
+  })
+
+  test("a session's own usage alert is not one: usage alerts are every session's", async ($, on) => {
+    const limits = [...RATE_LIMITS]
+    const { notes } = await start($, on, 'terminal', limits, undefined, {
+      settings: { alert: { WK: 50 } },
+      [SESSION_KEY]: { settings: { alert: { '5H': 80 } }, seenAt: NOW },
+    })
+    fiveHourAt(limits, 82)
+    limits[0] = { ...SEVEN_DAY, percentUsed: 55 }
+    await $.session.measure(MEASURE)
+    // The session's own 5H alert counts for nothing; every session's WK alert does.
+    expect(notes).toEqual(['WK at 55%, resets in 3d 4h.'])
+  })
+
+  test('the context alert: once, and again after the context falls back under it', async ($, on) => {
+    const context = { total: 212_200 }
+    const { notes } = await start($, on, 'terminal', RATE_LIMITS, undefined, { settings: { alert: { CTX: 50 } } }, { context })
+    context.total = 600_000
+    await $.session.measure(MEASURE)
+    expect(notes).toEqual(['Context at 60% (600k of 1M).'])
+    context.total = 650_000
+    await $.session.measure(MEASURE)
+    expect(notes.length).toBe(1)
+    // A compaction: under the level, then over it again.
+    context.total = 100_000
+    await $.session.measure(MEASURE)
+    context.total = 600_000
+    await $.session.measure(MEASURE)
+    expect(notes.length).toBe(2)
   })
 })
 
@@ -1972,7 +2177,7 @@ describe('usage snapshot', () => {
       ttlSource: 'subscription',
       expiresAt: null,
       warm: false,
-      keepWarm: { on: false, pings: 0, maxPings: 8, startedAt: null, maxMs: 28_800_000, lastPing: null },
+      keepWarm: { on: false, mode: 'pings', pings: 0, maxPings: 8, startedAt: null, maxMs: 28_800_000, lastPing: null },
     })
   })
 

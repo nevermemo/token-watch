@@ -66,10 +66,22 @@ export type PaceSetting = { show: Record<View, boolean>; forecast: Record<View, 
 
 // The settings, as one tree (../hooks/settings.ts): what each part shows in
 // each view, each usage part's pace, and keep-warm's caps by TTL.
+// What keep-warm does once on: ping, only remind with a notification before
+// the cache expires, or both (remind before the first ping of an idle spell).
+export type WarmMode = 'pings' | 'notify' | 'both'
+
+// The parts that can raise an alert: the usage windows and the context.
+export type AlertPart = UsagePart | 'CTX'
+
 export type SettingsTree = {
   show: Record<Part, Record<View, boolean>>
   pace: Record<UsagePart, PaceSetting>
   caps: CapSettings
+  // Keep-warm's mode, and how many minutes before it the reminder comes, by TTL.
+  warm: { mode: WarmMode; lead: Record<Ttl, number> }
+  // The level a part alerts at when it crosses it (50 to 95 in steps of 5,
+  // or 99), or null for no alert.
+  alert: Record<AlertPart, number | null>
 }
 
 // A session's own settings: any leaf of the tree, set or not.
@@ -82,6 +94,8 @@ export type SettingsOverride = {
     >
   >
   caps?: Partial<Record<Ttl, Partial<CapSetting>>>
+  warm?: { mode?: WarmMode; lead?: Partial<Record<Ttl, number>> }
+  alert?: Partial<Record<AlertPart, number | null>>
 }
 
 // What the band shows of the pace: per window kind, its rate, when it fills
@@ -151,6 +165,9 @@ export type KeepWarm = {
   // A line the band shows for a minute: the last ping's counts, a failure, or
   // why keep-warm stopped.
   note: { at: number; text: string } | null
+  // What the last reminder was for: in Notify mode the expiry it warned of,
+  // in Both the response the idle spell began with; null before one.
+  notifiedFor: number | null
 }
 
 // The cache as the snapshot lists it.
@@ -161,6 +178,8 @@ export type SnapshotCache = {
   warm: boolean
   keepWarm: {
     on: boolean
+    // Added in 1.4.0.
+    mode: WarmMode
     pings: number
     maxPings: number
     startedAt: string | null
@@ -206,8 +225,9 @@ export type BandProps = {
   hidden: Part[]
   paceHidden: Part[]
   forecastHidden: Part[]
-  // Keep-warm's caps in force for this session's TTL.
+  // Keep-warm's caps in force for this session's TTL, and its mode.
   cap: Cap
+  warmMode: WarmMode
   // The burn rates and forecasts.
   pace: Pace
 }
@@ -242,6 +262,9 @@ declare module 'claude-code' {
       // Which of the two the settings panel edits, and its open sections.
       scope: Scope
       openSections: string[]
+      // The alert levels this session's context has crossed, and not fallen
+      // back under since.
+      ctxAlerted: number[]
     }
   }
 }

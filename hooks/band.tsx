@@ -246,9 +246,20 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
   // The expanded row's button, in the timer's colour, says what pressing it
   // would do, or why it cannot: "No Data" before the first response, "Cache
   // Lost" once the cache has gone cold, "Let Chill" while keep-warm is on,
-  // else "Keep Warm". The terminal centres it in the longest label's cells so
+  // else "Keep Warm"; in Notify mode "Reminding" and "Remind Me". The terminal centres it in the longest label's cells so
   // the caps after it stay put; the desktop's proportional font cannot.
-  const warmText = isUnknown ? 'No Data' : isCold ? 'Cache Lost' : keepWarm.on ? 'Let Chill' : 'Keep Warm'
+  const isReminder = props.warmMode === 'notify'
+  const warmText = isUnknown
+    ? 'No Data'
+    : isCold
+      ? 'Cache Lost'
+      : keepWarm.on
+        ? isReminder
+          ? 'Reminding'
+          : 'Let Chill'
+        : isReminder
+          ? 'Remind Me'
+          : 'Keep Warm'
   const warmLabel = props.surface === 'desktop' ? warmText : centred(warmText, WARM_CELLS)
   const timer = chip('cache-timer', bandTimerLabel(cache, now, isWorking), timerFill, 'keep-warm')
 
@@ -384,7 +395,8 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
   )
   // While keep-warm is on, its caps follow, then a minute's note (a ping's
   // counts, why it stopped) when there is one. Both go below CAPS_MIN_COLUMNS.
-  const showCaps = keepWarm.on && surface.columns >= CAPS_MIN_COLUMNS
+  // Caps are the pings': a reminder has none.
+  const showCaps = keepWarm.on && !isReminder && surface.columns >= CAPS_MIN_COLUMNS
   const note =
     surface.columns >= CAPS_MIN_COLUMNS && keepWarm.note !== null && now - keepWarm.note.at < NOTE_MS ? keepWarm.note.text : ''
 

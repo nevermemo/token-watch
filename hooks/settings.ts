@@ -6,7 +6,7 @@
 // settings in force take the session's leaf where there is one, else the
 // global. Pure functions; the hooks module keeps and saves the trees.
 
-import type { BurnUnit, CapSetting, Part, SettingsOverride, SettingsTree, Ttl, UsagePart, View } from '../types'
+import type { AlertPart, BurnUnit, CapSetting, Part, SettingsOverride, SettingsTree, Ttl, UsagePart, View, WarmMode } from '../types'
 import { DEFAULT_CAPS, isCapValue, readCaps } from './cache'
 
 // The band's views, in the order the panel lists them, and the panel's names
@@ -29,28 +29,51 @@ export const PACE_WINDOWS: Record<UsagePart, number[]> = {
 }
 export const PACE_UNITS: Record<UsagePart, BurnUnit[]> = { '5H': ['h', 'min'], WK: ['h', 'day'], other: ['h', 'day'] }
 
+// Keep-warm's modes, and how many minutes before the cache expires (Notify)
+// or before the first ping (Both) the reminder comes, by TTL.
+export const WARM_MODES: WarmMode[] = ['pings', 'notify', 'both']
+export const NOTIFY_LEADS: Record<Ttl, number[]> = { '1h': [2, 5, 10, 15], '5m': [1, 2, 3] }
+
+// The parts that can alert, and the levels an alert's stepper goes through:
+// 50% to 95% in steps of 5, then 99%, then off (null).
+export const ALERT_PARTS: AlertPart[] = ['5H', 'WK', 'other', 'CTX']
+export const ALERT_STEPS: (number | null)[] = [50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 99, null]
+
+// The next alert level up (+1, towards off) or down (-1), held at the ends.
+export function stepAlert(level: number | null, by: 1 | -1) {
+  const i = ALERT_STEPS.indexOf(level)
+  return ALERT_STEPS[Math.min(ALERT_STEPS.length - 1, Math.max(0, i + by))] ?? null
+}
+
 export type Path = readonly string[]
 
 const everyView = (): Record<View, boolean> => ({ plain: true, bars: true, expanded: true })
-// The forecast, by default, only in the table, where it has a column.
+// The pace and its forecast, by default, only in the table, where they have
+// columns of their own.
 const expandedOnly = (): Record<View, boolean> => ({ plain: false, bars: false, expanded: true })
 
 export const DEFAULT_SETTINGS: SettingsTree = {
   show: { '5H': everyView(), WK: everyView(), other: everyView(), CTX: everyView(), TTL: everyView() },
   pace: {
-    '5H': { show: everyView(), forecast: expandedOnly(), windowMin: 30, unit: 'h' },
-    WK: { show: everyView(), forecast: expandedOnly(), windowMin: 360, unit: 'day' },
-    other: { show: everyView(), forecast: expandedOnly(), windowMin: 360, unit: 'day' },
+    '5H': { show: expandedOnly(), forecast: expandedOnly(), windowMin: 30, unit: 'h' },
+    WK: { show: expandedOnly(), forecast: expandedOnly(), windowMin: 360, unit: 'h' },
+    other: { show: expandedOnly(), forecast: expandedOnly(), windowMin: 360, unit: 'h' },
   },
   caps: DEFAULT_CAPS,
+  // Keep-warm reminds, free, unless pings are chosen.
+  warm: { mode: 'notify', lead: { '1h': 5, '5m': 1 } },
+  alert: { '5H': null, WK: null, other: null, CTX: null },
 }
 
-const isBool = (value: unknown) => typeof value === 'boolean'
 const TTLS: Ttl[] = ['1h', '5m']
 const CAP_FIELDS: (keyof CapSetting)[] = ['pings', 'hours']
 
-// Every leaf of the tree with its check.
-const LEAVES: { path: Path; isValid: (value: unknown) => boolean }[] = [
+const isBool = (value: unknown) => typeof value === 'boolean'
+
+// Every leaf of the tree with its check. A leaf `isGlobalOnly` has no
+// session's own value: the usage windows' alerts, the windows being the
+// account's, alert the same in every session.
+const LEAVES: { path: Path; isValid: (value: unknown) => boolean; isGlobalOnly?: true }[] = [
   ...ALL_PARTS.flatMap(part => VIEWS.map(v => ({ path: ['show', part, v], isValid: isBool }))),
   ...USAGE_PARTS.flatMap(part => [
     ...VIEWS.map(v => ({ path: ['pace', part, 'show', v], isValid: isBool })),
@@ -61,6 +84,13 @@ const LEAVES: { path: Path; isValid: (value: unknown) => boolean }[] = [
   ...TTLS.flatMap(ttl =>
     CAP_FIELDS.map(which => ({ path: ['caps', ttl, which], isValid: (value: unknown) => isCapValue(ttl, which, value) })),
   ),
+  { path: ['warm', 'mode'], isValid: (value: unknown) => WARM_MODES.includes(value as WarmMode) },
+  ...TTLS.map(ttl => ({ path: ['warm', 'lead', ttl], isValid: (value: unknown) => NOTIFY_LEADS[ttl].includes(value as number) })),
+  ...ALERT_PARTS.map(part => ({
+    path: ['alert', part],
+    isValid: (value: unknown) => ALERT_STEPS.includes(value as number | null),
+    ...(part === 'CTX' ? {} : { isGlobalOnly: true as const }),
+  })),
 ]
 
 export function getAt(tree: unknown, path: Path): unknown {
@@ -102,12 +132,18 @@ export function readSettings(saved: unknown): SettingsTree {
   }, DEFAULT_SETTINGS)
 }
 
-// A session's own settings read back: only the leaves that pass their check.
+// A session's own settings read back: only the leaves a session may set that
+// pass their check.
 export function readOverride(saved: unknown): SettingsOverride {
   return LEAVES.reduce<SettingsOverride>((tree, leaf) => {
     const value = getAt(saved, leaf.path)
-    return leaf.isValid(value) ? setAt(tree, leaf.path, value) : tree
+    return !leaf.isGlobalOnly && leaf.isValid(value) ? setAt(tree, leaf.path, value) : tree
   }, {})
+}
+
+// Whether a path names a leaf only the global settings hold.
+export function isGlobalOnly(path: Path) {
+  return LEAVES.some(leaf => leaf.isGlobalOnly && leaf.path.length === path.length && leaf.path.every((k, i) => k === path[i]))
 }
 
 // 1.3.0's settings, the parts it hid (hidden in every view) and its caps, as

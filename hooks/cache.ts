@@ -135,7 +135,15 @@ export const NO_CACHE: CacheState = {
   confirmed: false,
 }
 
-export const KEEP_WARM_OFF: KeepWarm = { on: false, startedAt: null, pings: 0, failures: 0, lastPing: null, note: null }
+export const KEEP_WARM_OFF: KeepWarm = {
+  on: false,
+  startedAt: null,
+  pings: 0,
+  failures: 0,
+  lastPing: null,
+  note: null,
+  notifiedFor: null,
+}
 
 // The TTL the main conversation gets, in Claude Code's order of precedence
 // (docs: prompt caching, "Choose the TTL yourself"): FORCE_PROMPT_CACHING_5M,
