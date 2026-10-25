@@ -6,7 +6,20 @@
 
 import type { PromptOrigin } from 'claude-code'
 
-import type { Cap, CacheState, CapSetting, CapSettings, KeepWarm, Limit, Ttl, TtlInputs, TtlSource, View } from '../types'
+import type {
+  Cap,
+  CacheState,
+  CapSetting,
+  CapSettings,
+  KeepWarm,
+  Limit,
+  Part,
+  SessionSettings,
+  Ttl,
+  TtlInputs,
+  TtlSource,
+  View,
+} from '../types'
 
 export const MINUTE = 60_000
 
@@ -60,19 +73,80 @@ export function stepCap(settings: CapSettings, ttl: Ttl, which: keyof CapSetting
   return { ...settings, [ttl]: { ...settings[ttl], [which]: value } }
 }
 
-// Caps read back from the store: each value a whole number on its stepper's
-// grid within its bounds, else the default. Anything else is the defaults.
+// Whether a value is one a cap's stepper can reach: a whole number on its
+// grid within its bounds.
+export function isCapValue(ttl: Ttl, which: keyof CapSetting, value: unknown): value is number {
+  const { min, max, step } = CAP_LIMITS[ttl][which]
+  return typeof value === 'number' && Number.isInteger(value) && value >= min && value <= max && (value - min) % step === 0
+}
+
+const TTLS: Ttl[] = ['1h', '5m']
+const CAP_FIELDS: (keyof CapSetting)[] = ['pings', 'hours']
+
+// The cap a stored value names, by TTL and field, if it names one.
+function capOf(saved: unknown, ttl: Ttl, which: keyof CapSetting): unknown {
+  return (saved as Partial<Record<Ttl, Partial<CapSetting>>> | null)?.[ttl]?.[which]
+}
+
+// Caps read back from the store: each value one its stepper can reach, else
+// the default. Anything else is the defaults.
 export function readCaps(saved: unknown): CapSettings {
   const read = (ttl: Ttl, which: keyof CapSetting) => {
-    const { min, max, step } = CAP_LIMITS[ttl][which]
-    const value = (saved as Partial<Record<Ttl, Partial<CapSetting>>> | null)?.[ttl]?.[which]
-    const ok = typeof value === 'number' && Number.isInteger(value) && value >= min && value <= max && (value - min) % step === 0
-    return ok ? value : DEFAULT_CAPS[ttl][which]
+    const value = capOf(saved, ttl, which)
+    return isCapValue(ttl, which, value) ? value : DEFAULT_CAPS[ttl][which]
   }
   return {
     '1h': { pings: read('1h', 'pings'), hours: read('1h', 'hours') },
     '5m': { pings: read('5m', 'pings'), hours: read('5m', 'hours') },
   }
+}
+
+// The parts of the band, in the order the band draws them.
+export const ALL_PARTS: Part[] = ['5H', 'WK', 'other', 'CTX', 'TTL']
+
+// A session with no settings of its own.
+export const NO_SESSION_SETTINGS: SessionSettings = { parts: {}, caps: {} }
+
+// How long a session's own settings are kept after it last saved them.
+export const SESSION_SETTINGS_KEEP_MS = 30 * 24 * 60 * MINUTE
+
+// A session's own settings read back from the store: a part hidden or shown
+// where it says so with a boolean, a cap where its stepper can reach the
+// value. Anything else is left to the global settings.
+export function readSessionSettings(saved: unknown): SessionSettings {
+  const s = saved as { parts?: Record<string, unknown> } | null
+  const parts: SessionSettings['parts'] = {}
+  for (const part of ALL_PARTS) {
+    const value = s?.parts?.[part]
+    if (typeof value === 'boolean') parts[part] = value
+  }
+  const caps: SessionSettings['caps'] = {}
+  for (const ttl of TTLS) {
+    for (const which of CAP_FIELDS) {
+      const value = capOf((saved as { caps?: unknown } | null)?.caps, ttl, which)
+      if (isCapValue(ttl, which, value)) caps[ttl] = { ...caps[ttl], [which]: value }
+    }
+  }
+  return { parts, caps }
+}
+
+export function isEmptySession(s: SessionSettings) {
+  return Object.keys(s.parts).length === 0 && TTLS.every(ttl => Object.keys(s.caps[ttl] ?? {}).length === 0)
+}
+
+// The parts hidden in force: the session's say where it has one, else the
+// global settings'.
+export function effectiveHidden(global: Part[], session: SessionSettings): Part[] {
+  return ALL_PARTS.filter(part => session.parts[part] ?? global.includes(part))
+}
+
+// The caps in force: the session's value where it has one, else the global.
+export function effectiveCaps(global: CapSettings, session: SessionSettings): CapSettings {
+  const cap = (ttl: Ttl) => ({
+    pings: session.caps[ttl]?.pings ?? global[ttl].pings,
+    hours: session.caps[ttl]?.hours ?? global[ttl].hours,
+  })
+  return { '1h': cap('1h'), '5m': cap('5m') }
 }
 
 // The one user message a ping appends; the reply is a few tokens.

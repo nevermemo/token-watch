@@ -44,6 +44,16 @@ export type CapSettings = Record<Ttl, CapSetting>
 // The caps in force: the most pings, and the most time on in milliseconds.
 export type Cap = { pings: number; ms: number }
 
+// A session's own settings over the global ones, set only for the pieces the
+// session changed: a part hidden (true) or shown (false), a cap's value.
+export type SessionSettings = {
+  parts: Partial<Record<Part, boolean>>
+  caps: Partial<Record<Ttl, Partial<CapSetting>>>
+}
+
+// Which settings the panel edits: this session's own, or every session's.
+export type Scope = 'session' | 'global'
+
 // The prompt cache's time to live, as Claude Code requests it.
 export type Ttl = '5m' | '1h'
 
@@ -173,10 +183,17 @@ declare module 'claude-code' {
       // When the ping now out was sent, or null with none out: a second ping
       // waits for it, across a reload too.
       pingingSince: number | null
-      // The parts of the band the settings panel hides; saved across sessions.
+      // The parts of the band hidden, and keep-warm's caps by TTL, in force
+      // in this session: the session's own settings over the global ones.
       hidden: Part[]
-      // Keep-warm's caps by TTL, as the settings panel sets them; saved.
       caps: CapSettings
+      // The global settings (saved, shared by every session) and this
+      // session's own (saved under its id), as the settings panel sets them.
+      globalHidden: Part[]
+      globalCaps: CapSettings
+      sessionSettings: SessionSettings
+      // Which of the two the settings panel edits.
+      scope: Scope
     }
   }
 }

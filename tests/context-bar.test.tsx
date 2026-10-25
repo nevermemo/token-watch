@@ -191,6 +191,7 @@ async function boot($: Engine, on: On, surface: 'terminal' | 'desktop' | null, r
     saved.delete(e.key)
     return { value: undefined }
   })
+  on('store.keys', () => ({ value: [...saved.keys()] }))
   on('settings.read', () => ({ value: options.settings ?? {} }))
   on('model.fork', async ($, e) => {
     forks.push(e.prompt)
@@ -1281,8 +1282,11 @@ const PANE = {
   props: { title: 'Token Watch', isFocused: false, bodyColumns: 44, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
 } as const
 
-async function mountPanel($: Engine, surface: Surface) {
+// The settings panel mounted; with 'global', switched to edit every
+// session's settings (it opens on this session's).
+async function mountPanel($: Engine, surface: Surface, scope?: 'global') {
   const pane = await $.ui.mount<Surface, 'Pane'>({ ...PANE, surface })
+  if (scope === 'global') await pane.press({ key: 'scope-global' })
   const drawn = async () => JSON.stringify(await pane.drawn())
   return { pane, drawn }
 }
@@ -1306,7 +1310,7 @@ describe('settings panel', () => {
 
     test(`${surface}: the panel's toggles hide parts of the band in every view, and are saved`, async ($, on) => {
       const { ui, band, saved } = await start($, on, surface, RATE_LIMITS)
-      const { pane, drawn } = await mountPanel($, surface)
+      const { pane, drawn } = await mountPanel($, surface, 'global')
       for (const part of ['5H', 'WK', 'other', 'CTX', 'TTL']) expect(await drawn()).toContain(toggle(surface, part, true))
       expect(await drawn()).toContain('OTH:')
 
@@ -1365,7 +1369,7 @@ describe('settings panel', () => {
   test('saved parts are restored, and anything unknown is dropped', async ($, on) => {
     const { band, saved } = await start($, on, 'terminal', RATE_LIMITS, undefined, { hidden: ['WK', 'nonsense', 3] })
     expect(await band()).not.toContain('"WK"')
-    const { pane } = await mountPanel($, 'terminal')
+    const { pane } = await mountPanel($, 'terminal', 'global')
     await pane.press({ key: 'part-WK' })
     expect(saved.get('hidden')).toEqual([])
     expect(await band()).toContain('"WK"')
@@ -1380,7 +1384,7 @@ describe('settings panel', () => {
   test("the caps steppers move this TTL's caps a step at a time, within bounds; saved, and Reset restores them", async ($, on) => {
     const { ui, band, saved, writes } = await start($, on, 'terminal', RATE_LIMITS, undefined, undefined, FIVE_M)
     await turn($)
-    const { pane, drawn } = await mountPanel($, 'terminal')
+    const { pane, drawn } = await mountPanel($, 'terminal', 'global')
     expect(await drawn()).toContain('Keep-warm caps (5m TTL)')
     await pane.press({ key: 'pings-up' })
     for (let i = 0; i < 5; i++) await pane.press({ key: 'hours-up' })
@@ -1434,7 +1438,7 @@ describe('settings panel', () => {
   test('on the hour the steppers go 1 to 24 pings and hours, a step of one', async ($, on) => {
     const { saved } = await start($, on, 'terminal', RATE_LIMITS)
     await turn($)
-    const { pane, drawn } = await mountPanel($, 'terminal')
+    const { pane, drawn } = await mountPanel($, 'terminal', 'global')
     expect(await drawn()).toContain('Keep-warm caps (1h TTL)')
     for (let i = 0; i < 8; i++) await pane.press({ key: 'pings-down' })
     for (let i = 0; i < 17; i++) await pane.press({ key: 'hours-up' })
@@ -1496,6 +1500,107 @@ describe('settings panel', () => {
     const { closes } = await start($, on, 'terminal', RATE_LIMITS, undefined, undefined, { paneUnplaced: 'no-surface' })
     expect((await run($, 'settings')).text).toBe("Token Watch settings: the panel can't be shown here (no-surface).")
     expect(closes).toEqual(['token-watch-settings'])
+  })
+})
+
+// The store key of this session's own settings ($.session.id answers sess-1).
+const SESSION_KEY = 'session:sess-1'
+
+describe('settings scopes', () => {
+  for (const surface of ['terminal', 'desktop'] as const) {
+    test(`${surface}: the panel edits this session by default: a toggle overrides the global setting here only, and reset gives it back`, async ($, on) => {
+      const { band, saved } = await start($, on, surface, RATE_LIMITS)
+      const { pane, drawn } = await mountPanel($, surface)
+      const [on1, off1] = surface === 'terminal' ? ['[\u25cf]', '[\u25cb]'] : ['\u25c9', '\u25cb']
+      expect(await drawn()).toContain(`"key":"scope-session","label":"${on1}"`)
+      expect(await drawn()).toContain(`"key":"scope-global","label":"${off1}"`)
+      await pane.press({ key: 'part-5H' })
+      expect(saved.get(SESSION_KEY)).toMatchObject({ parts: { '5H': true }, caps: {} })
+      expect(saved.has('hidden')).toBe(false)
+      expect(await band()).not.toContain('"5H"')
+      expect(await drawn()).toContain('"key":"reset-part-5H"')
+      await pane.press({ key: 'reset-part-5H' })
+      expect(saved.has(SESSION_KEY)).toBe(false)
+      expect(await band()).toContain('"5H"')
+      expect(await drawn()).not.toContain('"key":"reset-part-5H"')
+    })
+  }
+
+  test('a part toggled back to the global setting no longer overrides it', async ($, on) => {
+    const { saved } = await start($, on, 'terminal', RATE_LIMITS)
+    const { pane } = await mountPanel($, 'terminal')
+    await pane.press({ key: 'part-5H' })
+    expect(saved.get(SESSION_KEY)).toMatchObject({ parts: { '5H': true } })
+    await pane.press({ key: 'part-5H' })
+    expect(saved.has(SESSION_KEY)).toBe(false)
+  })
+
+  test("a session's own setting wins over the global one; every session's view notes it", async ($, on) => {
+    const { band, saved } = await start($, on, 'terminal', RATE_LIMITS, undefined, { hidden: ['WK'] })
+    expect(await band()).not.toContain('"WK"')
+    const { pane, drawn } = await mountPanel($, 'terminal')
+    await pane.press({ key: 'part-WK' })
+    expect(saved.get(SESSION_KEY)).toMatchObject({ parts: { WK: false } })
+    expect(saved.get('hidden')).toEqual(['WK'])
+    expect(await band()).toContain('"WK"')
+    await pane.press({ key: 'scope-global' })
+    const global = await drawn()
+    expect(global).toContain(toggle('terminal', 'WK', false))
+    expect(global).toContain('overridden here')
+    expect(global).not.toContain('"key":"reset-part-WK"')
+  })
+
+  test("another session's global change reaches this one at the next heartbeat, except where this session has its own", async ($, on) => {
+    const { band, clock, saved } = await start($, on, 'terminal', RATE_LIMITS, undefined, { [SESSION_KEY]: { parts: { CTX: false }, caps: {}, seenAt: NOW } })
+    expect(await band()).toContain('"5H"')
+    // Another session writes the shared store.
+    saved.set('hidden', ['5H', 'CTX'])
+    await clock.advance(30_000)
+    const after = await band()
+    expect(after).not.toContain('"5H"')
+    expect(after).toContain('"CTX"')
+  })
+
+  test("another session hides TTL for all sessions: keep-warm here stops at the next heartbeat", async ($, on) => {
+    const { ui, clock, forks, writes, saved } = await start($, on, 'terminal', RATE_LIMITS, undefined, undefined, FIVE_M)
+    await turn($)
+    await ui.press({ key: 'keep-warm' })
+    saved.set('hidden', ['TTL'])
+    await clock.advance(30_000)
+    expect(snapshotOf(writes).cache.keepWarm.on).toBe(false)
+    await clock.advance(10 * MINUTE)
+    expect(forks.length).toBe(0)
+  })
+
+  test("caps in this session's scope: an override, a reset per cap, and \"Use all sessions\"", async ($, on) => {
+    const { ui, band, saved } = await start($, on, 'terminal', RATE_LIMITS, undefined, undefined, FIVE_M)
+    await turn($)
+    const { pane, drawn } = await mountPanel($, 'terminal')
+    await pane.press({ key: 'pings-up' })
+    expect(saved.get(SESSION_KEY)).toMatchObject({ caps: { '5m': { pings: 35 } } })
+    expect(saved.has('caps')).toBe(false)
+    await ui.press({ key: 'keep-warm' })
+    expect(await band()).toContain('Pings: 0/35  Time: 00:00 / 2:00:00')
+    await pane.press({ key: 'reset-pings' })
+    expect(await band()).toContain('Pings: 0/30')
+    await pane.press({ key: 'hours-up' })
+    expect(saved.get(SESSION_KEY)).toMatchObject({ caps: { '5m': { hours: 3 } } })
+    expect(await drawn()).toContain('"label":"[Use all sessions]"')
+    await pane.press({ key: 'caps-reset' })
+    expect(saved.has(SESSION_KEY)).toBe(false)
+    expect(await band()).toContain('Time: 00:00 / 2:00:00')
+  })
+
+  test("a session's own settings are restored and kept fresh on start; ones left 30 days, or unreadable, are pruned", async ($, on) => {
+    const { band, saved } = await start($, on, 'terminal', RATE_LIMITS, undefined, {
+      [SESSION_KEY]: { parts: { WK: true }, caps: {}, seenAt: NOW - 24 * 60 * MINUTE },
+      'session:old': { parts: { CTX: true }, caps: {}, seenAt: NOW - 31 * 24 * 60 * MINUTE },
+      'session:junk': 'nonsense',
+    })
+    expect(await band()).not.toContain('"WK"')
+    expect(saved.has('session:old')).toBe(false)
+    expect(saved.has('session:junk')).toBe(false)
+    expect(saved.get(SESSION_KEY)).toMatchObject({ parts: { WK: true }, seenAt: NOW })
   })
 })
 
