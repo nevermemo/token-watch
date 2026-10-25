@@ -75,6 +75,7 @@ import type { EngineInterface, ModelForkResult, Register, Timer } from 'claude-c
 import type {
   BandProps,
   Cap,
+  ContextDetails,
   KeepWarm,
   Limit,
   Pace,
@@ -158,6 +159,13 @@ const scope = atom({ plugin: 'token-watch', key: 'scope' } as const, 'session')
 const openSections = atom({ plugin: 'token-watch', key: 'openSections' } as const, [])
 const ctxAlerted = atom({ plugin: 'token-watch', key: 'ctxAlerted' } as const, [])
 const history = atom({ plugin: 'token-watch', key: 'history' } as const, {})
+
+// The context's details lines, as the panel names them.
+const DETAILS: ['mcp' | 'memory' | 'skills', string][] = [
+  ['mcp', 'MCP servers'],
+  ['memory', 'Memory files'],
+  ['skills', 'Skills & agents'],
+]
 
 // Keep-warm's modes as the panel names and explains them.
 const WARM_MODE_NAMES: Record<WarmMode, string> = { pings: 'Pings', notify: 'Notify', both: 'Both' }
@@ -660,6 +668,31 @@ export const register: Register = (on, options) => {
           <Box flexDirection="column">
             {views('context-show', 'Show on band', ['show', 'CTX'], 'show-CTX')}
             {alerts('context-alert', 'CTX')}
+            {section(
+              'context-details',
+              'Details',
+              () => (
+                <Box flexDirection="column">
+                  <Box flexDirection="row" columnGap={1} flexWrap="wrap">
+                    {DETAILS.map(([which, name]) => {
+                      const isOn = shown.details[which]
+                      return (
+                        <Box key={which} flexDirection="row" columnGap={1} flexShrink={0}>
+                          <Button key={`details-${which}`} plain={plain} onPress={() => void setSetting($, ['details', which], !isOn)}>
+                            {mark(isOn)}
+                          </Button>
+                          <Text>{name}</Text>
+                        </Box>
+                      )
+                    })}
+                  </Box>
+                  <Text dimColor wrap="wrap">
+                    Lines under the legend, in the expanded view.
+                  </Text>
+                </Box>
+              ),
+              { isSub: true, extra: marker(['details']) },
+            )}
           </Box>
         ))}
         {section('cache', 'Cache time', () => (
@@ -777,6 +810,7 @@ export const register: Register = (on, options) => {
       forecastHidden: forecastHiddenIn(inForce, bandView),
       cap: await currentCap($),
       warmMode: inForce.warm.mode,
+      details: inForce.details,
       pace: await paceOf($, windows, clock),
     }
 
@@ -866,6 +900,7 @@ async function takeReading($: EngineInterface, isFresh = false) {
         total: breakdown.totalTokens,
         window: breakdown.rawMaxTokens,
         compactsAt: breakdown.isAutoCompactEnabled ? (breakdown.autoCompactThreshold ?? null) : null,
+        details: detailsOf(breakdown),
       }
       await update($, reading, () => next)
       // The last response's prompt, what a warm ping reads most of.
@@ -882,6 +917,32 @@ async function takeReading($: EngineInterface, isFresh = false) {
   await settleTtl($)
   await checkAlerts($)
   await writeSnapshot($)
+}
+
+// The context's details from a breakdown: the loaded MCP tools' tokens
+// summed by server and the memory files' by name (the file's own name, never
+// its path), largest first; the skills and the agents.
+function detailsOf(breakdown: {
+  mcpTools: readonly { serverName: string; tokens: number; isLoaded: boolean }[]
+  memoryFiles: readonly { path: string; tokens: number }[]
+  skills?: { includedSkills: number; totalSkills: number; tokens: number }
+  agents: readonly { tokens: number }[]
+}): ContextDetails {
+  const servers = new Map<string, number>()
+  for (const tool of breakdown.mcpTools) {
+    if (tool.isLoaded) servers.set(tool.serverName, (servers.get(tool.serverName) ?? 0) + tool.tokens)
+  }
+  const byTokens = (a: { tokens: number }, b: { tokens: number }) => b.tokens - a.tokens
+  return {
+    mcp: [...servers].map(([name, tokens]) => ({ name, tokens })).sort(byTokens),
+    memory: breakdown.memoryFiles
+      .map(file => ({ name: file.path.split(/[\\/]/).pop() || file.path, tokens: file.tokens }))
+      .sort(byTokens),
+    skills: breakdown.skills
+      ? { included: breakdown.skills.includedSkills, total: breakdown.skills.totalSkills, tokens: breakdown.skills.tokens }
+      : null,
+    agents: { count: breakdown.agents.length, tokens: breakdown.agents.reduce((n, agent) => n + agent.tokens, 0) },
+  }
 }
 
 async function tick($: EngineInterface) {

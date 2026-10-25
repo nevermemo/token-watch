@@ -72,7 +72,7 @@
 
 import type { ClientElements, ClientModule, RenderElement } from 'claude-code'
 
-import type { BandProps, Limit, Part, Reading } from '../types'
+import type { BandProps, ContextDetails, DetailsSetting, Limit, Part, Reading } from '../types'
 import { NOTE_MS } from './cache'
 import { rateText } from './burn'
 import { bandTimerLabel, capsLine, countdown, duration, label, levelColor, partOf, short, sorted, timerText } from './format'
@@ -149,6 +149,9 @@ const LEGEND: Record<string, string> = {
 
 // Below this many columns the expanded table leaves out the detail column.
 const DETAIL_MIN_COLUMNS = 50
+
+// The details lines' label column: "Memory" and a cell.
+const DETAIL_LABEL_WIDTH = 7
 
 // Below this many columns the table leaves out the burn rates and forecasts.
 const RATE_MIN_COLUMNS = 70
@@ -449,6 +452,19 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
           ))}
         </Box>
       )}
+      {showCtx &&
+        detailLines(current.details, props.details).map(([title, text]) => (
+          <Box key={title} flexDirection="row" columnGap={1} paddingLeft={labelWidth + 2}>
+            <Box width={DETAIL_LABEL_WIDTH} flexShrink={0}>
+              <Text dimColor>{title}</Text>
+            </Box>
+            <Box flexShrink={1} minWidth={0}>
+              <Text dimColor wrap="truncate">
+                {text}
+              </Text>
+            </Box>
+          </Box>
+        ))}
       {showTtl && (
         <Box flexDirection="row" alignItems="center" columnGap={2}>
           <Box width={labelWidth} flexShrink={0}>
@@ -584,6 +600,26 @@ function fit(
     ? 0
     : (METER_WIDTHS.find(width => columns - used - limits.length * (width + 1) >= keep) ?? 0)
   return { showDetail, meterWidth, showRates, showForecasts }
+}
+
+// The context's details lines the settings turn on and the reading has
+// something for: "MCP  slack 8.2k · github 6.1k", "Memory  CLAUDE.md 1.2k",
+// "Skills  12 of 40, 10k · agents 3, 67". Each is one line, cut at the band's
+// edge.
+function detailLines(details: ContextDetails | undefined, on: DetailsSetting): [string, string][] {
+  // A reading kept from before a reload may have no details yet.
+  if (details === undefined) return []
+  const list = (items: { name: string; tokens: number }[]) => items.map(i => `${i.name} ${short(i.tokens)}`).join(' \u00b7 ')
+  const lines: [string, string][] = []
+  if (on.mcp && details.mcp.length > 0) lines.push(['MCP', list(details.mcp)])
+  if (on.memory && details.memory.length > 0) lines.push(['Memory', list(details.memory)])
+  if (on.skills && (details.skills !== null || details.agents.count > 0)) {
+    const parts = []
+    if (details.skills !== null) parts.push(`${details.skills.included} of ${details.skills.total}, ${short(details.skills.tokens)}`)
+    if (details.agents.count > 0) parts.push(`agents ${details.agents.count}, ${short(details.agents.tokens)}`)
+    lines.push(['Skills', parts.join(' \u00b7 ')])
+  }
+  return lines
 }
 
 // A share of the window in parts per 10,000, the most flexGrow takes.

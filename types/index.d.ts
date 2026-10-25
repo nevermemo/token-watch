@@ -12,7 +12,21 @@ export type Reading = {
   total: number
   window: number
   compactsAt: number | null
+  // What the context's details lines show: the loaded MCP tools' tokens by
+  // server, the memory files' by name, largest first; the skills included of
+  // all, with their tokens; and the agents, with theirs.
+  details: ContextDetails
 }
+
+export type ContextDetails = {
+  mcp: { name: string; tokens: number }[]
+  memory: { name: string; tokens: number }[]
+  skills: { included: number; total: number; tokens: number } | null
+  agents: { count: number; tokens: number }
+}
+
+// Which of the context's details lines the expanded view shows.
+export type DetailsSetting = { mcp: boolean; memory: boolean; skills: boolean }
 
 // One plan usage window (five_hour, seven_day), as the status line has it.
 export type Limit = { kind: string; percentUsed: number; resetsAt?: string }
@@ -82,6 +96,8 @@ export type SettingsTree = {
   // The level a part alerts at when it crosses it (50 to 95 in steps of 5,
   // or 99), or null for no alert.
   alert: Record<AlertPart, number | null>
+  // The context's details lines in the expanded view.
+  details: DetailsSetting
 }
 
 // A session's own settings: any leaf of the tree, set or not.
@@ -96,6 +112,7 @@ export type SettingsOverride = {
   caps?: Partial<Record<Ttl, Partial<CapSetting>>>
   warm?: { mode?: WarmMode; lead?: Partial<Record<Ttl, number>> }
   alert?: Partial<Record<AlertPart, number | null>>
+  details?: Partial<DetailsSetting>
 }
 
 // What the band shows of the pace: per window kind, its rate, when it fills
@@ -228,6 +245,8 @@ export type BandProps = {
   // Keep-warm's caps in force for this session's TTL, and its mode.
   cap: Cap
   warmMode: WarmMode
+  // The context's details lines the settings turn on.
+  details: DetailsSetting
   // The burn rates and forecasts.
   pace: Pace
 }

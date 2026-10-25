@@ -43,10 +43,19 @@ const PING_FAILED: ModelForkResult = {
 const TURN_USAGE = { ...LAST_RESPONSE, model: 'claude-opus-5-5' }
 const MESSAGE: SessionMessage = { role: 'user', text: 'hi', toolUses: [] }
 
+// What a test may add to the breakdown: its lists of MCP tools, memory files,
+// skills and agents (none by default).
+type Extras = {
+  mcpTools?: { name: string; serverName: string; tokens: number; isLoaded: boolean }[]
+  memoryFiles?: { path: string; type: string; tokens: number }[]
+  skills?: { totalSkills: number; includedSkills: number; tokens: number; skillFrontmatter: [] }
+  agents?: { agentType: string; source: string; tokens: number }[]
+}
+
 // `apiUsage`: the last response's counts, which the band reads the prompt's
 // size from; null before one came back. `total`: the context's size, 212.2k
 // unless a test grows it (the messages row takes the difference).
-const usage = (rateLimits: SessionRateLimit[], apiUsage: ModelUsage | null = null, total = 212_200) => ({
+const usage = (rateLimits: SessionRateLimit[], apiUsage: ModelUsage | null = null, total = 212_200, extras: Extras = {}) => ({
   startedAt: 0,
   rateLimits,
   context: {
@@ -71,6 +80,7 @@ const usage = (rateLimits: SessionRateLimit[], apiUsage: ModelUsage | null = nul
       memoryFiles: [],
       mcpTools: [],
       agents: [],
+      ...extras,
       autoCompactThreshold: 950_000,
       isAutoCompactEnabled: true,
       apiUsage,
@@ -155,6 +165,8 @@ type Boot = {
   paneUnplaced?: string
   // The context's size, which a test may grow between readings.
   context?: { total: number }
+  // The breakdown's lists: MCP tools, memory files, skills and agents.
+  breakdown?: Extras
 }
 
 type Write = { path: string; text: string }
@@ -228,7 +240,7 @@ async function boot($: Engine, on: On, surface: 'terminal' | 'desktop' | null, r
     const { Box, Text } = $.ui.resolve(e)
     return options.beneath ? <Text>{options.beneath}</Text> : <Box />
   })
-  on('session.usage', () => ({ value: usage(rateLimits, options.apiUsage ?? null, options.context?.total) }))
+  on('session.usage', () => ({ value: usage(rateLimits, options.apiUsage ?? null, options.context?.total, options.breakdown) }))
   on('ui.notify', ($, e) => {
     notes.push(e.text)
     return { value: { isSent: true, channel: 'terminal_bell' } }
@@ -2068,6 +2080,70 @@ describe('notify and alerts', () => {
     context.total = 600_000
     await $.session.measure(MEASURE)
     expect(notes.length).toBe(2)
+  })
+})
+
+// A breakdown with lists for the context's details lines.
+const BREAKDOWN: Extras = {
+  mcpTools: [
+    { name: 'mcp__github__search', serverName: 'github', tokens: 4_100, isLoaded: true },
+    { name: 'mcp__slack__post', serverName: 'slack', tokens: 8_200, isLoaded: true },
+    { name: 'mcp__github__issue', serverName: 'github', tokens: 2_000, isLoaded: true },
+    // Deferred: not in the context, so not in the line.
+    { name: 'mcp__linear__list', serverName: 'linear', tokens: 9_000, isLoaded: false },
+  ],
+  memoryFiles: [
+    { path: '/home/you/proj/CLAUDE.md', type: 'Project', tokens: 1_200 },
+    { path: '/home/you/.claude/CLAUDE.md', type: 'User', tokens: 3_400 },
+  ],
+  skills: { totalSkills: 40, includedSkills: 12, tokens: 10_000, skillFrontmatter: [] },
+  agents: [
+    { agentType: 'reviewer', source: 'project', tokens: 40 },
+    { agentType: 'planner', source: 'user', tokens: 27 },
+  ],
+}
+
+describe('context details', () => {
+  test('off by default', async ($, on) => {
+    const { band } = await start($, on, 'terminal', RATE_LIMITS, undefined, undefined, { breakdown: BREAKDOWN })
+    expect(await band()).not.toContain('"MCP"')
+  })
+
+  test('turned on, a line each under the legend: MCP servers loaded, memory files by name, skills and agents', async ($, on) => {
+    const { ui, band } = await start($, on, 'terminal', RATE_LIMITS, undefined, {
+      settings: { details: { mcp: true, memory: true, skills: true } },
+    }, { breakdown: BREAKDOWN })
+    const expanded = await band()
+    expect(expanded).toContain('"slack 8.2k \u00b7 github 6.1k"')
+    expect(expanded).not.toContain('linear')
+    expect(expanded).toContain('"CLAUDE.md 3.4k \u00b7 CLAUDE.md 1.2k"')
+    expect(expanded).not.toContain('/home/you')
+    expect(expanded).toContain('"12 of 40, 10k \u00b7 agents 2, 67"')
+    // Under the legend, in the expanded view alone.
+    expect(expanded.indexOf('agents 1.1k')).toBeLessThan(expanded.indexOf('"MCP"'))
+    await ui.pointer(rightClick)
+    expect(await band()).not.toContain('"MCP"')
+  })
+
+  test('a line with nothing to say is left out', async ($, on) => {
+    const { band } = await start($, on, 'terminal', RATE_LIMITS, undefined, {
+      settings: { details: { mcp: true, memory: true, skills: true } },
+    }, { breakdown: { mcpTools: BREAKDOWN.mcpTools } })
+    const expanded = await band()
+    expect(expanded).toContain('"MCP"')
+    expect(expanded).not.toContain('"Memory"')
+    expect(expanded).not.toContain('"Skills"')
+  })
+
+  test("the panel's Details toggles, in this session's scope", async ($, on) => {
+    const { band, saved } = await start($, on, 'terminal', RATE_LIMITS, undefined, undefined, { breakdown: BREAKDOWN })
+    const { pane, drawn } = await mountPanel($, 'terminal', { open: ['context'] })
+    await pane.press({ key: 'section-context-details' })
+    expect(await drawn()).toContain(toggle('terminal', 'details-mcp', false))
+    await pane.press({ key: 'details-mcp' })
+    expect(saved.get(SESSION_KEY)).toMatchObject({ settings: { details: { mcp: true } } })
+    expect(await band()).toContain('"slack 8.2k \u00b7 github 6.1k"')
+    expect(await drawn()).toContain('"key":"reset-details"')
   })
 })
 

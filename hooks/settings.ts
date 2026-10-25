@@ -63,6 +63,7 @@ export const DEFAULT_SETTINGS: SettingsTree = {
   // Keep-warm reminds, free, unless pings are chosen.
   warm: { mode: 'notify', lead: { '1h': 5, '5m': 1 } },
   alert: { '5H': null, WK: null, other: null, CTX: null },
+  details: { mcp: false, memory: false, skills: false },
 }
 
 const TTLS: Ttl[] = ['1h', '5m']
@@ -86,6 +87,7 @@ const LEAVES: { path: Path; isValid: (value: unknown) => boolean; isGlobalOnly?:
   ),
   { path: ['warm', 'mode'], isValid: (value: unknown) => WARM_MODES.includes(value as WarmMode) },
   ...TTLS.map(ttl => ({ path: ['warm', 'lead', ttl], isValid: (value: unknown) => NOTIFY_LEADS[ttl].includes(value as number) })),
+  ...(['mcp', 'memory', 'skills'] as const).map(which => ({ path: ['details', which], isValid: isBool })),
   ...ALERT_PARTS.map(part => ({
     path: ['alert', part],
     isValid: (value: unknown) => ALERT_STEPS.includes(value as number | null),
