@@ -34,12 +34,18 @@
 // ui.message: the band was clicked: { action: 'cycle' } (right click) moves
 //   to the next view, { action: 'keep-warm' } (the timer or the keep-warm
 //   button) toggles keep-warm, { action: 'refresh-caps' } starts its caps over.
-// ui.render (Pane, the settings panel): which parts of the band show, and
-//   keep-warm's caps for this session's TTL, for this session or for every
+// ui.render (Pane, the settings panel): which parts of the band show,
+//   keep-warm's caps for this session's TTL and the burn rate's window and
+//   unit, for this session or for every
 //   session: a session's own setting overrides the global one for that piece.
 //   While the TTL row is hidden keep-warm stays off, so nothing spends out of
 //   sight. Every 30 s the global settings are read again, so a change another
 //   session made reaches this one.
+//
+// Burn rates: each reading's usage windows are kept in the store where they
+// moved (./burn.ts), shared by every session since the windows are the
+// account's, and this session's context totals in $.state; the band shows
+// each window's pace and when it fills, and the readings left to compact.
 //
 // A reading is $.session.usage({ breakdown: 'summary' }): the /context rows,
 // estimated locally, so it costs no token-count request, and the plan's
@@ -61,11 +67,13 @@ import type { EngineInterface, ModelForkResult, Register, Timer } from 'claude-c
 
 import type {
   BandProps,
+  Burn,
   Cap,
   CapSetting,
   CapSettings,
   KeepWarm,
   Limit,
+  Pace,
   Part,
   Reading,
   Scope,
@@ -77,8 +85,10 @@ import type {
 } from '../types'
 import {
   BACKGROUND_ORIGINS,
+  BURN_WINDOWS,
   CAP_LIMITS,
   COLD_READ_SHARE,
+  DEFAULT_BURN,
   DEFAULT_CAPS,
   KEEP_WARM_OFF,
   MAX_FAILURES,
@@ -92,18 +102,22 @@ import {
   SESSION_SETTINGS_KEEP_MS,
   TTL_MS,
   caps,
+  effectiveBurn,
   effectiveCaps,
   effectiveHidden,
   isEmptySession,
   isTtl,
   leadMs,
   nextView,
+  readBurn,
   readCaps,
   readSessionSettings,
   refreshMs,
   resolveTtl,
+  stepBurnWindow,
   stepCap,
 } from './cache'
+import { addContext, addReadings, fullAt, ratePerHour, readHistory, turnsToCompact } from './burn'
 import { PARTS, hmmss, isPart, label, partOf, readingLine, short, sorted } from './format'
 
 const reading = atom({ plugin: 'token-watch', key: 'reading' } as const, null)
@@ -122,6 +136,10 @@ const globalHidden = atom({ plugin: 'token-watch', key: 'globalHidden' } as cons
 const globalCaps = atom({ plugin: 'token-watch', key: 'globalCaps' } as const, DEFAULT_CAPS)
 const sessionSettings = atom({ plugin: 'token-watch', key: 'sessionSettings' } as const, NO_SESSION_SETTINGS)
 const scope = atom({ plugin: 'token-watch', key: 'scope' } as const, 'session')
+const burn = atom({ plugin: 'token-watch', key: 'burn' } as const, DEFAULT_BURN)
+const globalBurn = atom({ plugin: 'token-watch', key: 'globalBurn' } as const, DEFAULT_BURN)
+const history = atom({ plugin: 'token-watch', key: 'history' } as const, {})
+const ctxHistory = atom({ plugin: 'token-watch', key: 'ctxHistory' } as const, [])
 
 // The settings panel's pane id, and its width when docked beside the transcript.
 const SETTINGS = 'token-watch-settings'
@@ -193,6 +211,8 @@ export const register: Register = (on, options) => {
     await tick($)
     await pruneSessionSettings($)
     await loadSettings($, true)
+    const keptHistory = readHistory(await $.store.get('history'))
+    await update($, history, () => keptHistory)
     // A new session has no usage windows until its first response, so start
     // from the last ones seen; any whose reset time has passed is drawn at 0%,
     // and the first response replaces them.
@@ -392,6 +412,7 @@ export const register: Register = (on, options) => {
     // cell of slack for its proportional font.
     const nameWidth = Math.max(...PARTS.map(([, name]) => name.length)) + (isTerminal ? 1 : 2)
     const capWidth = 'Hours:'.length + (isTerminal ? 0 : 1)
+    const burnWidth = 'Window:'.length + (isTerminal ? 0 : 1)
     const isGlobal = await editsGlobal($)
     const hasSession = (await sessionKey($)) !== null
     const session = await read($, sessionSettings)
@@ -400,6 +421,7 @@ export const register: Register = (on, options) => {
     const off = isGlobal ? await read($, globalHidden) : await read($, hidden)
     const ttl = (await read($, cache)).ttl
     const shownCaps = isGlobal ? await read($, globalCaps) : await read($, capSettings)
+    const shownBurn = isGlobal ? await read($, globalBurn) : await read($, burn)
     const overridden = (
       <Text dimColor wrap="truncate">
         overridden here
@@ -496,7 +518,52 @@ export const register: Register = (on, options) => {
           )}
         </Box>
         <Text dimColor wrap="wrap">
-          {`Defaults: ${DEFAULT_CAPS[ttl].pings} pings or ${DEFAULT_CAPS[ttl].hours} hours. A running keep-warm already past a new cap stops. /context-bar settings opens this panel again.`}
+          {`Defaults: ${DEFAULT_CAPS[ttl].pings} pings or ${DEFAULT_CAPS[ttl].hours} hours. A running keep-warm already past a new cap stops.`}
+        </Text>
+        <Text bold>Burn rate</Text>
+        <Box flexDirection="column">
+          <Box flexDirection="row" columnGap={1}>
+            <Box width={burnWidth} flexShrink={0}>
+              <Text>Window:</Text>
+            </Box>
+            <Button
+              key="burn-window-down"
+              plain={plain}
+              dimColor={shownBurn.windowMin <= BURN_WINDOWS[0]!}
+              onPress={() => void setBurn($, b => ({ windowMin: stepBurnWindow(b.windowMin, -1) }))}
+            >
+              {isTerminal ? '[-]' : '−'}
+            </Button>
+            <Text>{`${shownBurn.windowMin} min`}</Text>
+            <Button
+              key="burn-window-up"
+              plain={plain}
+              dimColor={shownBurn.windowMin >= BURN_WINDOWS[BURN_WINDOWS.length - 1]!}
+              onPress={() => void setBurn($, b => ({ windowMin: stepBurnWindow(b.windowMin, 1) }))}
+            >
+              {isTerminal ? '[+]' : '+'}
+            </Button>
+            {session.burn.windowMin !== undefined && !isGlobal && reset('reset-burn-window', () => void resetBurn($, 'windowMin'))}
+            {session.burn.windowMin !== undefined && isGlobal && overridden}
+          </Box>
+          <Box flexDirection="row" columnGap={1}>
+            <Box width={burnWidth} flexShrink={0}>
+              <Text>Unit:</Text>
+            </Box>
+            {(['h', 'min'] as const).map(unit => (
+              <Box key={unit} flexDirection="row" columnGap={1} flexShrink={0}>
+                <Button key={`burn-unit-${unit}`} plain={plain} onPress={() => void setBurn($, () => ({ unit }))}>
+                  {choice(shownBurn.unit === unit)}
+                </Button>
+                <Text>{`%/${unit}`}</Text>
+              </Box>
+            ))}
+            {session.burn.unit !== undefined && !isGlobal && reset('reset-burn-unit', () => void resetBurn($, 'unit'))}
+            {session.burn.unit !== undefined && isGlobal && overridden}
+          </Box>
+        </Box>
+        <Text dimColor wrap="wrap">
+          A usage window's pace is averaged over the window, once it holds 5 minutes of readings. /context-bar settings opens this panel again.
         </Text>
       </Box>
     )
@@ -529,6 +596,7 @@ export const register: Register = (on, options) => {
       surface: e.surface,
       hidden: off,
       cap: await currentCap($),
+      pace: await paceOf($, windows, clock),
     }
 
     // The settings button sits outside the band, beside it: a press on a
@@ -577,6 +645,11 @@ async function takeReading($: EngineInterface) {
       const windows = [...reported, ...kept]
       await update($, limits, () => windows)
       await $.store.set('limits', windows)
+      // Read the store's samples first: another session may have added some.
+      const before = readHistory(await $.store.get('history'))
+      const after = addReadings(before, reported, now)
+      await update($, history, () => after)
+      if (after !== before) await $.store.set('history', after)
     }
     const breakdown = context.breakdown
     if (breakdown && breakdown.rawMaxTokens) {
@@ -599,6 +672,8 @@ async function takeReading($: EngineInterface) {
         compactsAt: breakdown.isAutoCompactEnabled ? (breakdown.autoCompactThreshold ?? null) : null,
       }
       await update($, reading, () => next)
+      const at = await $.clock.now()
+      await update($, ctxHistory, samples => addContext(samples, next.total, at))
       // The last response's prompt, what a warm ping reads most of.
       const api = breakdown.apiUsage
       if (api) {
@@ -715,6 +790,7 @@ async function loadSettings($: EngineInterface, touch = false) {
   const savedHidden = await $.store.get('hidden')
   const nextHidden: Part[] = Array.isArray(savedHidden) ? savedHidden.filter(isPart) : []
   const nextCaps = readCaps(await $.store.get('caps'))
+  const nextBurn = readBurn(await $.store.get('burn'))
   const key = await sessionKey($)
   const nextSession = key === null ? NO_SESSION_SETTINGS : readSessionSettings(await $.store.get(key))
   const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
@@ -725,6 +801,10 @@ async function loadSettings($: EngineInterface, touch = false) {
   }
   if (!same(await read($, globalCaps), nextCaps)) {
     await update($, globalCaps, () => nextCaps)
+    isChanged = true
+  }
+  if (!same(await read($, globalBurn), nextBurn)) {
+    await update($, globalBurn, () => nextBurn)
     isChanged = true
   }
   if (!same(await read($, sessionSettings), nextSession)) {
@@ -744,6 +824,8 @@ async function applySettings($: EngineInterface) {
   const nextCaps = effectiveCaps(await read($, globalCaps), session)
   if (JSON.stringify(await read($, hidden)) !== JSON.stringify(nextHidden)) await update($, hidden, () => nextHidden)
   if (JSON.stringify(await read($, capSettings)) !== JSON.stringify(nextCaps)) await update($, capSettings, () => nextCaps)
+  const nextBurn = effectiveBurn(await read($, globalBurn), session)
+  if (JSON.stringify(await read($, burn)) !== JSON.stringify(nextBurn)) await update($, burn, () => nextBurn)
   if (nextHidden.includes('TTL') && (await read($, keepWarm)).on) await stopKeepWarm($, null)
   await holdToCaps($)
 }
@@ -841,6 +923,50 @@ async function resetCaps($: EngineInterface) {
   await update($, globalCaps, () => DEFAULT_CAPS)
   await $.store.set('caps', DEFAULT_CAPS)
   await applySettings($)
+}
+
+// The burn rate's window a step longer or shorter, or its unit chosen, in
+// the scope the panel edits; in this session's, one put back to the global
+// setting no longer overrides it.
+async function setBurn($: EngineInterface, change: (b: Burn) => Partial<Burn>) {
+  const g = await read($, globalBurn)
+  if (await editsGlobal($)) {
+    const next = { ...g, ...change(g) }
+    await update($, globalBurn, () => next)
+    await $.store.set('burn', next)
+  } else {
+    const session = await read($, sessionSettings)
+    const wanted = { ...session.burn, ...change(await read($, burn)) }
+    const burnOverride: Partial<Burn> = {}
+    if (wanted.windowMin !== undefined && wanted.windowMin !== g.windowMin) burnOverride.windowMin = wanted.windowMin
+    if (wanted.unit !== undefined && wanted.unit !== g.unit) burnOverride.unit = wanted.unit
+    await saveSession($, { ...session, burn: burnOverride })
+  }
+  await applySettings($)
+}
+
+// One of the burn rate's settings back to the global in this session.
+async function resetBurn($: EngineInterface, which: keyof Burn) {
+  const session = await read($, sessionSettings)
+  const { [which]: _dropped, ...rest } = session.burn
+  await saveSession($, { ...session, burn: rest })
+  await applySettings($)
+}
+
+// The pace the band shows, now: each window's rate over the burn window and
+// when it fills, and the readings left to compact.
+async function paceOf($: EngineInterface, windows: Limit[], now: number): Promise<Pace> {
+  const b = await read($, burn)
+  const windowMs = b.windowMin * 60_000
+  const h = await read($, history)
+  const pace: Pace = { windows: {}, ctxTurns: null, unit: b.unit }
+  for (const w of windows) {
+    const perHour = ratePerHour(h[w.kind]?.samples ?? [], now, windowMs)
+    if (perHour !== null) pace.windows[w.kind] = { perHour, fullAt: fullAt(w.percentUsed, perHour, now, w.resetsAt) }
+  }
+  const latest = await read($, reading)
+  pace.ctxTurns = turnsToCompact(await read($, ctxHistory), now, windowMs, latest?.compactsAt ?? null)
+  return pace
 }
 
 // A session's settings with one cap set, or left to the global (undefined).
@@ -1084,6 +1210,7 @@ async function writeSnapshot($: EngineInterface, force = false) {
     const k = await read($, keepWarm)
     const cap = caps(c.ttl, await read($, capSettings))
     const iso = (ms: number) => new Date(ms).toISOString()
+    const pace = await paceOf($, await read($, limits), now)
     const snapshot: Snapshot = {
       schema: 1,
       writtenAt: iso(now),
@@ -1091,12 +1218,17 @@ async function writeSnapshot($: EngineInterface, force = false) {
         id: await $.session.id().catch(() => null),
         cwd: await $.session.cwd().catch(() => null),
       },
-      windows: sorted(await read($, limits)).map(w => ({
-        kind: w.kind,
-        label: label(w),
-        percentUsed: w.percentUsed,
-        resetsAt: w.resetsAt ?? null,
-      })),
+      windows: sorted(await read($, limits)).map(w => {
+        const p = pace.windows[w.kind]
+        return {
+          kind: w.kind,
+          label: label(w),
+          percentUsed: w.percentUsed,
+          resetsAt: w.resetsAt ?? null,
+          ratePerHour: p ? Math.round(p.perHour * 100) / 100 : null,
+          fullAt: p?.fullAt ? iso(p.fullAt) : null,
+        }
+      }),
       context:
         latest === null
           ? null

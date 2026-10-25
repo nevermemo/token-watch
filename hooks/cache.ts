@@ -7,6 +7,7 @@
 import type { PromptOrigin } from 'claude-code'
 
 import type {
+  Burn,
   Cap,
   CacheState,
   CapSetting,
@@ -104,8 +105,36 @@ export function readCaps(saved: unknown): CapSettings {
 // The parts of the band, in the order the band draws them.
 export const ALL_PARTS: Part[] = ['5H', 'WK', 'other', 'CTX', 'TTL']
 
+// The burn rate's averaging windows, in minutes, and its defaults.
+export const BURN_WINDOWS = [15, 30, 60, 120]
+export const DEFAULT_BURN: Burn = { windowMin: 30, unit: 'h' }
+
+export function isBurnWindow(value: unknown): value is number {
+  return typeof value === 'number' && BURN_WINDOWS.includes(value)
+}
+
+export function isBurnUnit(value: unknown): value is Burn['unit'] {
+  return value === 'h' || value === 'min'
+}
+
+// The burn rate's settings read back from the store; anything else, the
+// defaults.
+export function readBurn(saved: unknown): Burn {
+  const s = saved as Partial<Burn> | null
+  return {
+    windowMin: isBurnWindow(s?.windowMin) ? s.windowMin : DEFAULT_BURN.windowMin,
+    unit: isBurnUnit(s?.unit) ? s.unit : DEFAULT_BURN.unit,
+  }
+}
+
+// The next window up (+1) or down (-1), held at the ends.
+export function stepBurnWindow(windowMin: number, by: 1 | -1) {
+  const i = BURN_WINDOWS.indexOf(windowMin)
+  return BURN_WINDOWS[Math.min(BURN_WINDOWS.length - 1, Math.max(0, i + by))] ?? DEFAULT_BURN.windowMin
+}
+
 // A session with no settings of its own.
-export const NO_SESSION_SETTINGS: SessionSettings = { parts: {}, caps: {} }
+export const NO_SESSION_SETTINGS: SessionSettings = { parts: {}, caps: {}, burn: {} }
 
 // How long a session's own settings are kept after it last saved them.
 export const SESSION_SETTINGS_KEEP_MS = 30 * 24 * 60 * MINUTE
@@ -127,11 +156,24 @@ export function readSessionSettings(saved: unknown): SessionSettings {
       if (isCapValue(ttl, which, value)) caps[ttl] = { ...caps[ttl], [which]: value }
     }
   }
-  return { parts, caps }
+  const b = (saved as { burn?: Partial<Burn> } | null)?.burn
+  const burn: SessionSettings['burn'] = {}
+  if (isBurnWindow(b?.windowMin)) burn.windowMin = b.windowMin
+  if (isBurnUnit(b?.unit)) burn.unit = b.unit
+  return { parts, caps, burn }
 }
 
 export function isEmptySession(s: SessionSettings) {
-  return Object.keys(s.parts).length === 0 && TTLS.every(ttl => Object.keys(s.caps[ttl] ?? {}).length === 0)
+  return (
+    Object.keys(s.parts).length === 0 &&
+    TTLS.every(ttl => Object.keys(s.caps[ttl] ?? {}).length === 0) &&
+    Object.keys(s.burn).length === 0
+  )
+}
+
+// The burn rate's settings in force: the session's where it has them.
+export function effectiveBurn(global: Burn, session: SessionSettings): Burn {
+  return { windowMin: session.burn.windowMin ?? global.windowMin, unit: session.burn.unit ?? global.unit }
 }
 
 // The parts hidden in force: the session's say where it has one, else the

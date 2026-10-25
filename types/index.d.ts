@@ -23,6 +23,11 @@ export type SnapshotWindow = {
   label: string
   percentUsed: number
   resetsAt: string | null
+  // The pace over the burn-rate window, in percentage points an hour, and
+  // when the window fills at it (before it resets); null without either.
+  // Added in 1.4.0.
+  ratePerHour: number | null
+  fullAt: string | null
 }
 
 // The band's three views, in the order a right click cycles them: the table,
@@ -44,11 +49,34 @@ export type CapSettings = Record<Ttl, CapSetting>
 // The caps in force: the most pings, and the most time on in milliseconds.
 export type Cap = { pings: number; ms: number }
 
+// The burn rate's settings: the window its pace is averaged over, in
+// minutes, and the unit it is printed in.
+export type BurnUnit = 'h' | 'min'
+export type Burn = { windowMin: number; unit: BurnUnit }
+
+// A usage window's percentage, kept when it moved, and the windows' samples
+// by kind with the reset time they belong to.
+export type Sample = { at: number; percent: number }
+export type History = Record<string, { resetsAt: string | null; samples: Sample[] }>
+
+// The context's total, kept when it moved.
+export type CtxSample = { at: number; total: number }
+
+// What the band shows of the pace: per window kind, its rate and when it
+// fills; the readings left until auto-compact; and the unit.
+export type Pace = {
+  windows: Record<string, { perHour: number; fullAt: number | null }>
+  ctxTurns: number | null
+  unit: BurnUnit
+}
+
 // A session's own settings over the global ones, set only for the pieces the
-// session changed: a part hidden (true) or shown (false), a cap's value.
+// session changed: a part hidden (true) or shown (false), a cap's value, the
+// burn rate's window or unit.
 export type SessionSettings = {
   parts: Partial<Record<Part, boolean>>
   caps: Partial<Record<Ttl, Partial<CapSetting>>>
+  burn: Partial<Burn>
 }
 
 // Which settings the panel edits: this session's own, or every session's.
@@ -166,6 +194,8 @@ export type BandProps = {
   hidden: Part[]
   // Keep-warm's caps in force for this session's TTL.
   cap: Cap
+  // The burn rates and forecasts.
+  pace: Pace
 }
 
 declare module 'claude-code' {
@@ -187,11 +217,17 @@ declare module 'claude-code' {
       // in this session: the session's own settings over the global ones.
       hidden: Part[]
       caps: CapSettings
+      burn: Burn
       // The global settings (saved, shared by every session) and this
       // session's own (saved under its id), as the settings panel sets them.
       globalHidden: Part[]
       globalCaps: CapSettings
+      globalBurn: Burn
       sessionSettings: SessionSettings
+      // The usage windows' samples (shared through the store) and this
+      // session's context samples, for the burn rates.
+      history: History
+      ctxHistory: CtxSample[]
       // Which of the two the settings panel edits.
       scope: Scope
     }

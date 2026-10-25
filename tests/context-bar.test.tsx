@@ -44,17 +44,24 @@ const TURN_USAGE = { ...LAST_RESPONSE, model: 'claude-opus-5-5' }
 const MESSAGE: SessionMessage = { role: 'user', text: 'hi', toolUses: [] }
 
 // `apiUsage`: the last response's counts, which the band reads the prompt's
-// size from; null before one came back.
-const usage = (rateLimits: SessionRateLimit[], apiUsage: ModelUsage | null = null) => ({
+// size from; null before one came back. `total`: the context's size, 212.2k
+// unless a test grows it (the messages row takes the difference).
+const usage = (rateLimits: SessionRateLimit[], apiUsage: ModelUsage | null = null, total = 212_200) => ({
   startedAt: 0,
   rateLimits,
   context: {
-    tokens: 212_200,
+    tokens: total,
     window: 1_000_000,
     percent: 21,
     breakdown: {
-      categories: ROWS.map(([name, tokens, kind]) => ({ name, tokens, kind, color: 'inactive', isDeferred: false })),
-      totalTokens: 212_200,
+      categories: ROWS.map(([name, tokens, kind]) => ({
+        name,
+        tokens: name === 'Messages' ? tokens + total - 212_200 : tokens,
+        kind,
+        color: 'inactive',
+        isDeferred: false,
+      })),
+      totalTokens: total,
       maxTokens: 1_000_000,
       rawMaxTokens: 1_000_000,
       autocompactSource: 'auto' as const,
@@ -146,6 +153,8 @@ type Boot = {
   apiUsage?: ModelUsage
   // Why no surface places a pane; every pane is placed by default.
   paneUnplaced?: string
+  // The context's size, which a test may grow between readings.
+  context?: { total: number }
 }
 
 type Write = { path: string; text: string }
@@ -211,7 +220,7 @@ async function boot($: Engine, on: On, surface: 'terminal' | 'desktop' | null, r
     const { Box, Text } = $.ui.resolve(e)
     return options.beneath ? <Text>{options.beneath}</Text> : <Box />
   })
-  on('session.usage', () => ({ value: usage(rateLimits, options.apiUsage ?? null) }))
+  on('session.usage', () => ({ value: usage(rateLimits, options.apiUsage ?? null, options.context?.total) }))
   on('session.surfaces', () => ({ value: options.surfaces ?? (surface ? [surface] : []) }))
   on('session.id', () => ({ value: 'sess-1' }))
   on('session.cwd', () => ({ value: 'C:/proj' }))
@@ -1606,6 +1615,140 @@ describe('settings scopes', () => {
   })
 })
 
+// The 5-hour window at a new percentage, read on the next measure.
+const fiveHourAt = (limits: SessionRateLimit[], percentUsed: number) => {
+  limits[1] = { ...FIVE_HOUR, percentUsed }
+}
+
+describe('burn rate', () => {
+  for (const surface of ['terminal', 'desktop'] as const) {
+    test(`${surface}: a window's pace over the burn window, and when it fills before it resets; the collapsed line shows the pace`, async ($, on) => {
+      const limits = [...RATE_LIMITS]
+      const { ui, band, clock } = await start($, on, surface, limits)
+      await clock.advance(10 * MINUTE)
+      fiveHourAt(limits, 67.4)
+      await $.session.measure(MEASURE)
+      // 5 points in 10 minutes: 30 an hour; the 32.6 left fill in 65 minutes,
+      // before the reset at 2h 14m.
+      const expanded = await band()
+      expect(expanded).toContain('"+30%/h"')
+      expect(expanded).toContain('"full in 1h 05m"')
+      expect(expanded).toContain('"+0.0%/h"')
+      await ui.pointer(rightClick)
+      expect(await band()).toContain('"+30%/h"')
+    })
+  }
+
+  test('no pace before the window holds 5 minutes of readings', async ($, on) => {
+    const limits = [...RATE_LIMITS]
+    const { band, clock } = await start($, on, 'terminal', limits)
+    await clock.advance(4 * MINUTE)
+    fiveHourAt(limits, 67.4)
+    await $.session.measure(MEASURE)
+    expect(await band()).not.toContain('%/h')
+    // At 5 minutes it shows: 5 points in 5 minutes, 60 an hour.
+    await clock.advance(MINUTE)
+    expect(await band()).toContain('"+60%/h"')
+  })
+
+  test("the panel's window and unit change the pace shown", async ($, on) => {
+    const limits = [...RATE_LIMITS]
+    const { band, clock } = await start($, on, 'terminal', limits)
+    await clock.advance(30 * MINUTE)
+    fiveHourAt(limits, 63.4)
+    await $.session.measure(MEASURE)
+    await clock.advance(10 * MINUTE)
+    fiveHourAt(limits, 66.4)
+    await $.session.measure(MEASURE)
+    // Over 30 minutes: 62.4 to 66.4, 8 an hour. Over 15: from 62.4 (the value
+    // when the 15 minutes began) to 66.4, 16 an hour.
+    expect(await band()).toContain('"+8.0%/h"')
+    const { pane } = await mountPanel($, 'terminal')
+    await pane.press({ key: 'burn-window-down' })
+    expect(await band()).toContain('"+16%/h"')
+    await pane.press({ key: 'burn-unit-min' })
+    expect(await band()).toContain('"+0.27%/min"')
+  })
+
+  test('a window that resets starts its pace over', async ($, on) => {
+    const limits = [...RATE_LIMITS]
+    const { band, clock } = await start($, on, 'terminal', limits)
+    await clock.advance(10 * MINUTE)
+    fiveHourAt(limits, 67.4)
+    await $.session.measure(MEASURE)
+    expect(await band()).toContain('"+30%/h"')
+    limits[1] = { kind: 'five_hour', percentUsed: 2, resetsAt: new Date(NOW + 5 * 60 * MINUTE).toISOString() }
+    await $.session.measure(MEASURE)
+    expect(await band()).not.toContain('"+30%/h"')
+  })
+
+  test("the samples are the account's: a new session reads the pace at once from the store", async ($, on) => {
+    const { band, saved } = await start($, on, 'terminal', RATE_LIMITS, undefined, {
+      history: { five_hour: { resetsAt: FIVE_HOUR.resetsAt, samples: [{ at: NOW - 20 * MINUTE, percent: 52.4 }] } },
+    })
+    // 10 points in the 20 minutes since the first sample: 30 an hour.
+    expect(await band()).toContain('"+30%/h"')
+    expect(saved.get('history')).toMatchObject({
+      five_hour: { samples: [{ at: NOW - 20 * MINUTE, percent: 52.4 }, { at: NOW, percent: 62.4 }] },
+    })
+  })
+
+  test('the context: readings left until auto-compact at its growth per reading', async ($, on) => {
+    const context = { total: 212_200 }
+    const { band } = await start($, on, 'terminal', RATE_LIMITS, undefined, undefined, { context })
+    context.total = 222_200
+    await $.session.measure(MEASURE)
+    context.total = 232_200
+    await $.session.measure(MEASURE)
+    // 10k a reading; 717.8k left before 950k: 72 readings.
+    expect(await band()).toContain('"~72 turns to compact"')
+  })
+
+  test('the snapshot carries each window\'s pace and when it fills', async ($, on) => {
+    const limits = [...RATE_LIMITS]
+    const { clock, writes } = await start($, on, 'terminal', limits)
+    await clock.advance(10 * MINUTE)
+    fiveHourAt(limits, 67.4)
+    await $.session.measure(MEASURE)
+    const fiveHour = snapshotOf(writes).windows.find((w: { kind: string }) => w.kind === 'five_hour')
+    expect(fiveHour.ratePerHour).toBe(30)
+    // ISO strings drop the fraction of a millisecond; within a second will do.
+    const off = Math.abs(Date.parse(fiveHour.fullAt) - (NOW + 10 * MINUTE) - (32.6 / 30) * 60 * MINUTE)
+    expect(off).toBeLessThan(1000)
+  })
+
+  test('narrow, the collapsed line gives up the paces first, and the table its pace columns', async ($, on) => {
+    const limits = [...RATE_LIMITS]
+    const { ui, band, clock } = await start($, on, 'terminal', limits)
+    await clock.advance(10 * MINUTE)
+    fiveHourAt(limits, 67.4)
+    await $.session.measure(MEASURE)
+    await ui.resize({ columns: 69, rows: 8, in: 'band' })
+    expect(await band()).not.toContain('%/h')
+    await ui.pointer(rightClick)
+    await ui.resize({ columns: 150, rows: 8, in: 'band' })
+    expect(await band()).toContain('"+30%/h"')
+    await ui.resize({ columns: 60, rows: 8, in: 'band' })
+    const narrow = await band()
+    expect(narrow).not.toContain('%/h')
+    expect(narrow).toContain('212k / 1M')
+  })
+
+  test("the burn rate's settings in this session's scope: an override and its reset", async ($, on) => {
+    const { saved } = await start($, on, 'terminal', RATE_LIMITS)
+    const { pane, drawn } = await mountPanel($, 'terminal')
+    await pane.press({ key: 'burn-unit-min' })
+    expect(saved.get(SESSION_KEY)).toMatchObject({ burn: { unit: 'min' } })
+    expect(saved.has('burn')).toBe(false)
+    await pane.press({ key: 'reset-burn-unit' })
+    expect(saved.has(SESSION_KEY)).toBe(false)
+    await pane.press({ key: 'scope-global' })
+    await pane.press({ key: 'burn-window-up' })
+    expect(saved.get('burn')).toEqual({ windowMin: 60, unit: 'h' })
+    expect(await drawn()).toContain('"60 min"')
+  })
+})
+
 const LINE = '5H 62% (2h 14m) · WK 31% (3d 4h) · CTX 21% (212k / 1M)'
 const MEASURE: SessionMeasureInput = { context: { tokens: 212_200, window: 1_000_000, percent: 21 }, rateLimits: RATE_LIMITS, changed: ['context'] }
 const SNAPSHOT_PATH = 'C:/Users/test/.claude/token-watch/usage.json'
@@ -1693,8 +1836,8 @@ describe('usage snapshot', () => {
     // The windows in the band's order with its labels, as reported: a
     // reader shows one whose reset time has passed at 0%.
     expect(snapshot.windows).toEqual([
-      { kind: 'five_hour', label: '5H', percentUsed: 62.4, resetsAt: FIVE_HOUR.resetsAt },
-      { kind: 'seven_day', label: 'WK', percentUsed: 31, resetsAt: SEVEN_DAY.resetsAt },
+      { kind: 'five_hour', label: '5H', percentUsed: 62.4, resetsAt: FIVE_HOUR.resetsAt, ratePerHour: null, fullAt: null },
+      { kind: 'seven_day', label: 'WK', percentUsed: 31, resetsAt: SEVEN_DAY.resetsAt, ratePerHour: null, fullAt: null },
     ])
     expect(snapshot.context.total).toBe(212_200)
     expect(snapshot.context.window).toBe(1_000_000)

@@ -39,6 +39,13 @@
 // Collapsed without bars ('plain'): the line's labels, percentages, detail
 //   and timer alone.
 //
+// Burn rates (props.pace): in the table, after a window's reset countdown,
+// its pace ("+12%/h") and, when it would fill before it resets, when ("full
+// in 1h 20m"), and after the context's size the readings left to compact
+// ("~9 turns to compact"), in two more fixed columns so the bars still line
+// up; on the collapsed line a window's pace after its percentage, the first
+// thing the line gives up when it runs out of room.
+//
 // The settings panel can hide parts (props.hidden): the 5H and WK windows,
 // any other window, CTX (with its legend) and TTL (with the timer and
 // keep-warm's buttons). A hidden part is left out of every view; with
@@ -64,7 +71,8 @@ import type { ClientElements, ClientModule, RenderElement } from 'claude-code'
 
 import type { BandProps, Limit, Part, Reading } from '../types'
 import { NOTE_MS } from './cache'
-import { bandTimerLabel, capsLine, countdown, label, levelColor, partOf, short, sorted, timerText } from './format'
+import { rateText } from './burn'
+import { bandTimerLabel, capsLine, countdown, duration, label, levelColor, partOf, short, sorted, timerText } from './format'
 
 // Local state: whether the pointer is over the band; the frame clock's
 // milliseconds since the instance started (what the countdown ticks on); and
@@ -86,7 +94,7 @@ function displayNow(props: BandProps, state: Local) {
   return props.nowMs + (state.anchorNowMs === props.nowMs ? state.frameMs - state.anchorFrameMs : 0)
 }
 
-type Row = { label: string; bar: RenderElement[]; percent: number; detail: string }
+type Row = { label: string; bar: RenderElement[]; percent: number; detail: string; rate: string; forecast: string }
 
 // One palette for both views and both surfaces: what is still available (the
 // usage tracks, the context's free space), and the reserve past the
@@ -135,6 +143,12 @@ const LEGEND: Record<string, string> = {
 
 // Below this many columns the expanded table leaves out the detail column.
 const DETAIL_MIN_COLUMNS = 50
+
+// Below this many columns the table leaves out the burn rates and forecasts.
+const RATE_MIN_COLUMNS = 70
+
+// A forecast that a window fills before it resets, in the warning colour.
+const FORECAST = '#e06c6c'
 
 // Below this many columns the TTL row leaves out keep-warm's caps and notes.
 const CAPS_MIN_COLUMNS = 90
@@ -230,10 +244,22 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
   const warmLabel = props.surface === 'desktop' ? warmText : centred(warmText, WARM_CELLS)
   const timer = chip('cache-timer', bandTimerLabel(cache, now, isWorking), timerFill, 'keep-warm')
 
+  // A window's pace, and when it fills (before it resets), as the band
+  // prints them; empty without either.
+  const rateOf = (limit: Limit) => {
+    const p = props.pace.windows[limit.kind]
+    return p ? rateText(p.perHour, props.pace.unit) : ''
+  }
+  const forecastOf = (limit: Limit) => {
+    const at = props.pace.windows[limit.kind]?.fullAt
+    return at ? `full in ${duration(at - props.nowMs)}` : ''
+  }
+
   if (view !== 'expanded') {
     const showBars = view === 'bars'
     const detail = `${short(current.total)} / ${short(current.window)}`
-    const { showDetail, showMeters } = fit(surface.columns, limits, percent, detail, showBars, showCtx, showTtl)
+    const ratesCells = limits.reduce((n, limit) => n + (rateOf(limit) ? rateOf(limit).length + 1 : 0), 0)
+    const { showDetail, showMeters, showRates } = fit(surface.columns, limits, percent, detail, showBars, showCtx, showTtl, ratesCells)
     // With every part hidden the line is empty; the settings button beside
     // the band (drawn by the hooks module) is the way back.
     if (limits.length === 0 && !showCtx && !showTtl) return <Box height={1} />
@@ -250,6 +276,11 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
               </Box>
             )}
             <Text wrap="truncate" {...warning(limit.percentUsed)}>{`${Math.round(limit.percentUsed)}%`}</Text>
+            {showRates && rateOf(limit) !== '' && (
+              <Text dimColor wrap="truncate">
+                {rateOf(limit)}
+              </Text>
+            )}
           </Box>
         ))}
         {/* With bars the context bar fills the line and the timer ends it;
@@ -292,6 +323,8 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
       // The reset countdowns move by the minute, so they follow the hooks
       // module's 30-second readings rather than the frame clock.
       detail: countdown(limit.resetsAt, props.nowMs),
+      rate: rateOf(limit),
+      forecast: forecastOf(limit),
     })),
     ...(showCtx
       ? [
@@ -300,6 +333,8 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
             bar: bar(draw, current, TRACK, RESERVE),
             percent,
             detail: `${short(current.total)} / ${short(current.window)}`,
+            rate: '',
+            forecast: props.pace.ctxTurns === null ? '' : `~${props.pace.ctxTurns} turns to compact`,
           },
         ]
       : []),
@@ -307,6 +342,11 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
   const labelWidth = Math.max(3, ...rows.map(row => row.label.length)) + SLACK
   const showDetail = surface.columns >= DETAIL_MIN_COLUMNS
   const detailWidth = Math.max(0, ...rows.map(row => row.detail.length)) + SLACK
+  // The pace and forecast columns, each as wide as its longest entry, so the
+  // bars end in the same column on every row; none without either.
+  const showRates = showDetail && surface.columns >= RATE_MIN_COLUMNS
+  const rateWidth = Math.max(0, ...rows.map(row => row.rate.length))
+  const forecastWidth = Math.max(0, ...rows.map(row => row.forecast.length))
   const legend = current.slices.filter(s => s.kind === 'used').sort((a, b) => b.tokens - a.tokens)
   // A legend swatch: a 2-cell bar, drawn the way the bars are.
   const swatch = (color: string) => (
@@ -340,6 +380,20 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
             <Box width={detailWidth} flexShrink={0}>
               <Text dimColor wrap="truncate">
                 {row.detail}
+              </Text>
+            </Box>
+          )}
+          {showRates && rateWidth > 0 && (
+            <Box width={rateWidth + SLACK} flexShrink={0}>
+              <Text dimColor wrap="truncate">
+                {row.rate}
+              </Text>
+            </Box>
+          )}
+          {showRates && forecastWidth > 0 && (
+            <Box width={forecastWidth + SLACK} flexShrink={0}>
+              <Text wrap="truncate" dimColor={row.label === 'CTX'} color={row.label === 'CTX' ? undefined : FORECAST}>
+                {row.forecast}
               </Text>
             </Box>
           )}
@@ -451,10 +505,11 @@ function meter(draw: Draw, percentUsed: number) {
 }
 
 // Which of the collapsed line's extras fit: the detail, then the usage
-// meters. Counted in cells, the bar's room being what is left after the
-// padding, labels, percentages, gaps and the timer; the desktop's
-// proportional text measures a little wider, which the bar absorbs. Without
-// the context there is no bar to keep room for: the meters need only fit.
+// meters, then the paces (`ratesCells`, each with its gap), the first to go.
+// Counted in cells, the bar's room being what is left after the padding,
+// labels, percentages, gaps and the timer; the desktop's proportional text
+// measures a little wider, which the bar absorbs. Without the context there
+// is no bar to keep room for: the extras need only fit.
 function fit(
   columns: number,
   limits: Limit[],
@@ -463,6 +518,7 @@ function fit(
   showBars: boolean,
   showCtx: boolean,
   showTtl: boolean,
+  ratesCells: number,
 ) {
   const usage = limits.reduce(
     (n, limit) => n + label(limit).length + 1 + `${Math.round(limit.percentUsed)}%`.length + CELL_GAP,
@@ -470,14 +526,21 @@ function fit(
   )
   const meters = limits.length * (METER_WIDTH + 1)
   const base = 2 + usage + (showTtl ? TIMER_CELLS : 0)
-  if (!showCtx) return { showDetail: false, showMeters: showBars && columns - (base + meters) >= 0 }
+  if (!showCtx) {
+    const showMeters = showBars && columns - (base + meters) >= 0
+    const used = base + (showMeters ? meters : 0)
+    return { showDetail: false, showMeters, showRates: ratesCells > 0 && columns - used - ratesCells >= 0 }
+  }
   const withCtx = base + 'CTX'.length + 1 + 1 + `${percent}%`.length
   const withDetail = withCtx + 2 + detail.length
   const withMeters = withDetail + meters
   // Without bars there is no context bar to keep room for, and no meters.
   const showDetail = columns - withDetail >= (showBars ? BAR_MIN : 0)
   const showMeters = showBars && showDetail && columns - withMeters >= METERS_BAR_MIN
-  return { showDetail, showMeters }
+  const used = showMeters ? withMeters : showDetail ? withDetail : withCtx
+  const keep = showMeters ? METERS_BAR_MIN : showBars ? BAR_MIN : 0
+  const showRates = ratesCells > 0 && columns - used - ratesCells >= keep
+  return { showDetail, showMeters, showRates }
 }
 
 // A share of the window in parts per 10,000, the most flexGrow takes.

@@ -57,6 +57,11 @@ export function countdown(resetsAt: string | undefined, nowMs: number) {
   const ms = Date.parse(resetsAt) - nowMs
   if (Number.isNaN(ms)) return ''
   if (ms <= 0) return 'now'
+  return duration(ms)
+}
+
+// A span of time, rounded down to the minute: "3d 4h", "2h 14m", "9m".
+export function duration(ms: number) {
   const minutes = Math.floor(ms / 60_000)
   const days = Math.floor(minutes / 1_440)
   const hours = Math.floor((minutes % 1_440) / 60)
