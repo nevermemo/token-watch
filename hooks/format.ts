@@ -67,12 +67,6 @@ export function mmss(ms: number) {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
 }
 
-// A span as hours and minutes, rounded down: "0:42", "2:00".
-export function hmm(ms: number) {
-  const minutes = Math.max(0, Math.floor(ms / 60_000))
-  return `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, '0')}`
-}
-
 // The cache timer's label: the whole TTL while a turn runs (its requests
 // refresh the cache), "--:--" before the first response, "lost" once the
 // countdown has run out, else the time left.
@@ -127,12 +121,12 @@ export function capsLine(keepWarm: KeepWarm, cache: CacheState, nowMs: number) {
   return `Pings: ${keepWarm.pings}/${cap.pings}  Time: ${clockText(elapsed)} / ${hmmss(cap.ms)}`
 }
 
-// Keep-warm's caps for the text reply: pings sent of the most allowed, and
-// time on of the most allowed, "pings 3/30 · 0:42/2:00".
+// Keep-warm's caps for the text reply, spelled as the band spells them:
+// "pings 3/30 · 42:05 / 2:00:00".
 export function capsText(keepWarm: KeepWarm, cache: CacheState, nowMs: number) {
   const cap = caps(refreshMs(cache.ttl))
   const elapsed = keepWarm.startedAt === null ? 0 : nowMs - keepWarm.startedAt
-  return `pings ${keepWarm.pings}/${cap.pings} · ${hmm(elapsed)}/${hmm(cap.ms)}`
+  return `pings ${keepWarm.pings}/${cap.pings} · ${clockText(elapsed)} / ${hmmss(cap.ms)}`
 }
 
 // What the text reply knows of the cache beside the reading.

@@ -54,26 +54,33 @@
 // next view; a left click does nothing but press a Button; hover brightens
 // the labels.
 
-import type { ClientModule } from 'claude-code'
+import type { ClientElements, ClientModule, RenderElement } from 'claude-code'
 
 import type { BandProps, Limit, Reading } from '../types'
 import { NOTE_MS } from './cache'
 import { bandTimerLabel, capsLine, countdown, label, levelColor, short, sorted, timerText } from './format'
 
-// Local state: whether the pointer is over the band, and the frame clock's
-// milliseconds since the instance started (what the countdown ticks on).
-type Local = { isHovered: boolean; frameMs: number }
-const INITIAL: Local = { isHovered: false, frameMs: 0 }
+// Local state: whether the pointer is over the band; the frame clock's
+// milliseconds since the instance started (what the countdown ticks on); and
+// the anchor, the hooks module's clock reading the frame clock was last
+// lined up with and the frame clock then. The display clock is that reading
+// plus the frames since. Kept in the instance's state, so a band drawn again
+// (hidden and shown, or after a survey) starts from its own frame clock.
+type Local = { isHovered: boolean; frameMs: number; anchorNowMs: number; anchorFrameMs: number }
+const INITIAL: Local = { isHovered: false, frameMs: 0, anchorNowMs: 0, anchorFrameMs: 0 }
 
-// The hooks module's clock reading when the frame clock was last anchored to
-// it, and the frame clock then: the display clock is props.nowMs plus the
-// frames since. The latest props, for the ticker. Module variables: the
-// instance is one per band and outlives its redraws, and nothing here needs
-// to survive a reload.
-let anchor: { nowMs: number; frameMs: number } | null = null
+// The latest props, for the ticker, whose callback outlives the call that
+// started it. A module variable: nothing here needs to survive a reload.
 let latest: BandProps | null = null
 
-type Row = { label: string; bar: unknown[]; percent: number; detail: string }
+// The display clock: the hooks module's reading, plus the frames since the
+// anchor while the anchor is that reading. A new reading counts from itself
+// until the ticker lines the anchor up with it.
+function displayNow(props: BandProps, state: Local) {
+  return props.nowMs + (state.anchorNowMs === props.nowMs ? state.frameMs - state.anchorFrameMs : 0)
+}
+
+type Row = { label: string; bar: RenderElement[]; percent: number; detail: string }
 
 // One palette for both views and both surfaces: what is still available (the
 // usage tracks, the context's free space), and the reserve past the
@@ -107,7 +114,6 @@ function centred(text: string, cells: number) {
 
 // The reserve past the auto-compact point, a step darker than the track.
 const RESERVE = '#2e3139'
-
 
 // What a terminal draws a piece with: the lower half block, shorter than its
 // cell, and one every console font has (the finer ▆ is missing from Consolas
@@ -152,16 +158,17 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
   if (surface.state === undefined) {
     surface.setState(INITIAL)
     // One ticker per instance, started on the first call: a redraw a second
-    // while there is a countdown to move.
+    // while there is a countdown to move, none once it has run out.
     surface.every(1000, () => {
-      if (latest === null || latest.cache.warmUntil === null || latest.isWorking) return
       const s = surface.state ?? INITIAL
-      surface.setState({ ...s, frameMs: s.frameMs + 1000 })
+      if (latest === null || latest.cache.warmUntil === null || latest.isWorking) return
+      if (displayNow(latest, s) >= latest.cache.warmUntil) return
+      const anchored = s.anchorNowMs === latest.nowMs ? s : { ...s, anchorNowMs: latest.nowMs, anchorFrameMs: s.frameMs }
+      surface.setState({ ...anchored, frameMs: anchored.frameMs + 1000 })
     })
   }
   const state = surface.state ?? INITIAL
-  if (anchor === null || anchor.nowMs !== props.nowMs) anchor = { nowMs: props.nowMs, frameMs: state.frameMs }
-  const now = props.nowMs + (state.frameMs - anchor.frameMs)
+  const now = displayNow(props, state)
   const { reading: current, view, isWorking, cache, keepWarm } = props
   const limits = sorted(props.limits)
   const isHovered = state.isHovered
@@ -267,7 +274,9 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
       label: label(limit),
       bar: meter(draw, limit.percentUsed),
       percent: limit.percentUsed,
-      detail: countdown(limit.resetsAt, nowMsOf(props)),
+      // The reset countdowns move by the minute, so they follow the hooks
+      // module's 30-second readings rather than the frame clock.
+      detail: countdown(limit.resetsAt, props.nowMs),
     })),
     {
       label: 'CTX',
@@ -339,9 +348,7 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
             <Text dimColor>{capsLine(keepWarm, cache, now)}</Text>
           </Box>
         )}
-        {showCaps && (
-          chip('refresh-caps', 'Refresh Caps', CHIP_OFF, 'refresh-caps')
-        )}
+        {showCaps && chip('refresh-caps', 'Refresh Caps', CHIP_OFF, 'refresh-caps')}
         {note !== '' && (
           <Box flexShrink={1} minWidth={0}>
             <Text dimColor wrap="truncate">
@@ -356,17 +363,11 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
 
 export default Band
 
-// The hooks module's clock, for the reset countdowns: those move by the
-// minute, so they follow its 30-second readings rather than the frame clock.
-function nowMsOf(props: BandProps) {
-  return props.nowMs
-}
-
 // How a bar draws one piece: a colour over a share of the bar (`grow`) or a
 // fixed number of cells (`width`). No minimum size: the share is exact, so a
 // bar's fill matches the percentage printed beside it.
 type Size = { grow?: number; width?: number }
-type Draw = (color: string, size: Size) => unknown
+type Draw = (color: string, size: Size) => RenderElement
 
 const box = (size: Size) => ({
   width: size.width ?? 0,
@@ -381,7 +382,12 @@ const box = (size: Size) => ({
 // holding a run of GLYPH, which wraps exactly at the Box's width and whose
 // overflow is clipped. (The run is longer than any piece can be, so it fills
 // the Box whatever share it has.)
-function pieces(Box, Text, surface: BandProps['surface'], columns: number): Draw {
+function pieces(
+  Box: ClientElements['Box'],
+  Text: ClientElements['Text'],
+  surface: BandProps['surface'],
+  columns: number,
+): Draw {
   if (surface === 'desktop') {
     return (color, size) => <Box {...box(size)} height="60%" backgroundColor={color} />
   }

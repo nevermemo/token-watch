@@ -4,14 +4,16 @@
 // module (./register.tsx) applies them and the band (./band.tsx) reads the
 // constants it shows.
 
+import type { PromptOrigin } from 'claude-code'
+
 import type { CacheState, KeepWarm, Limit, Ttl, TtlInputs, TtlSource, View } from '../types'
 
 export const MINUTE = 60_000
 
 export const TTL_MS: Record<Ttl, number> = { '5m': 5 * MINUTE, '1h': 60 * MINUTE }
 
-// How long a keep-warm ping keeps the cache warm, counted from the ping: null
-// means the main conversation's own TTL.
+// How long a keep-warm ping keeps the cache warm, counted from the ping: the
+// main conversation's own TTL.
 //
 // Measured in the spike. Five-minute TTL (forced): a check eight minutes after
 // a response read nothing from the cache (run A0), and read 47k tokens when
@@ -19,8 +21,10 @@ export const TTL_MS: Record<Ttl, number> = { '5m': 5 * MINUTE, '1h': 60 * MINUTE
 // minutes read nothing (run B0), and read the 33k tokens a fork had read at
 // 55 minutes (run B1), ten minutes after that ping: a fork's read renews the
 // entries it hits for their original TTL, not for the fork's own five
-// minutes. Set a number of milliseconds here to assume a shorter renewal.
-export const PING_REFRESH_MS: number | null = null
+// minutes.
+export function refreshMs(ttl: Ttl) {
+  return TTL_MS[ttl]
+}
 
 // How long before the believed expiry a ping is sent, by the window it
 // extends: 75 s on a five-minute window, 8 min on an hour. Generous, because
@@ -37,11 +41,6 @@ export function caps(windowMs: number) {
   return windowMs >= TTL_MS['1h'] ? { pings: 8, ms: 8 * 60 * MINUTE } : { pings: 30, ms: 2 * 60 * MINUTE }
 }
 
-// What one ping refreshes the cache for, under the TTL the conversation has.
-export function refreshMs(ttl: Ttl) {
-  return PING_REFRESH_MS ?? TTL_MS[ttl]
-}
-
 // The one user message a ping appends; the reply is a few tokens.
 export const PING_PROMPT = 'Reply with the single word: ok'
 
@@ -49,6 +48,10 @@ export const PING_PROMPT = 'Reply with the single word: ok'
 // failed one after RETRY_MS.
 export const MAX_FAILURES = 2
 export const RETRY_MS = 30_000
+
+// A ping still unanswered after this long is taken as lost (a reload dropped
+// the module that sent it), so the next one may go out.
+export const PING_LOST_MS = 2 * MINUTE
 
 // A ping that reads less than this share of the last response's prompt found
 // the cache cold (a warm fork read about 70% of it in the spike, since its
@@ -62,7 +65,7 @@ export const NOTE_MS = 60_000
 
 // Prompt origins that are not the person typing (PromptOrigin in the API's
 // declarations): a prompt from any other origin turns keep-warm off.
-export const BACKGROUND_ORIGINS: ReadonlySet<string> = new Set([
+export const BACKGROUND_ORIGINS: ReadonlySet<PromptOrigin['kind']> = new Set<PromptOrigin['kind']>([
   'task-notification',
   'scheduled-trigger',
   'peer',
@@ -80,12 +83,11 @@ export function isTtl(value: unknown): value is Ttl {
   return value === '5m' || value === '1h'
 }
 
-export const NO_INPUTS: TtlInputs = { force5m: false, envTtl: null, settingTtl: null, enable1h: false, idleCompaction: true }
+export const NO_INPUTS: TtlInputs = { force5m: false, envTtl: null, settingTtl: null, enable1h: false }
 
 export const NO_CACHE: CacheState = {
   ttl: '5m',
   ttlSource: 'API key or cloud',
-  idleCompaction: false,
   lastResponseAt: null,
   warmUntil: null,
   windowMs: TTL_MS['5m'],

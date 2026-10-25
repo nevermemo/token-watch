@@ -46,23 +46,18 @@ export type TtlSource =
   | 'subscription'
 
 // The TTL controls, read once at session start: three environment variables
-// and the promptCacheTtl setting, plus whether idle compaction is allowed
-// (the idleCompaction and autoCompactEnabled settings not false).
+// and the promptCacheTtl setting.
 export type TtlInputs = {
   force5m: boolean
   envTtl: Ttl | null
   settingTtl: Ttl | null
   enable1h: boolean
-  idleCompaction: boolean
 }
 
 // What the band knows of the main conversation's prompt cache.
 export type CacheState = {
   ttl: Ttl
   ttlSource: TtlSource
-  // Whether Claude Code may compact this conversation while it idles: the
-  // hour TTL, and the settings allow it.
-  idleCompaction: boolean
   // When the last main-thread response ended, in ms since the epoch: the
   // countdown counts from here. Null before the first response and after
   // /clear.
@@ -156,6 +151,9 @@ declare module 'claude-code' {
       ttlInputs: TtlInputs
       cache: CacheState
       keepWarm: KeepWarm
+      // When the ping now out was sent, or null with none out: a second ping
+      // waits for it, across a reload too.
+      pingingSince: number | null
     }
   }
 }
