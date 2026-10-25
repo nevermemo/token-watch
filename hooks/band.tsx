@@ -56,9 +56,9 @@
 
 import type { ClientElements, ClientModule, RenderElement } from 'claude-code'
 
-import type { BandProps, Limit, Reading } from '../types'
+import type { BandProps, Limit, Part, Reading } from '../types'
 import { NOTE_MS } from './cache'
-import { bandTimerLabel, capsLine, countdown, label, levelColor, short, sorted, timerText } from './format'
+import { bandTimerLabel, capsLine, countdown, label, levelColor, partOf, short, sorted, timerText } from './format'
 
 // Local state: whether the pointer is over the band; the frame clock's
 // milliseconds since the instance started (what the countdown ticks on); and
@@ -170,7 +170,11 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
   const state = surface.state ?? INITIAL
   const now = displayNow(props, state)
   const { reading: current, view, isWorking, cache, keepWarm } = props
-  const limits = sorted(props.limits)
+  // The parts the settings panel leaves shown.
+  const shows = (part: Part) => !props.hidden.includes(part)
+  const limits = sorted(props.limits).filter(limit => shows(partOf(limit)))
+  const showCtx = shows('CTX')
+  const showTtl = shows('TTL')
   const isHovered = state.isHovered
 
   surface.onPointer(event => {
@@ -223,7 +227,10 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
   if (view !== 'expanded') {
     const showBars = view === 'bars'
     const detail = `${short(current.total)} / ${short(current.window)}`
-    const { showDetail, showMeters } = fit(surface.columns, limits, percent, detail, showBars)
+    const { showDetail, showMeters } = fit(surface.columns, limits, percent, detail, showBars, showCtx, showTtl)
+    // With every part hidden the line is empty; the settings button beside
+    // the band (drawn by the hooks module) is the way back.
+    if (limits.length === 0 && !showCtx && !showTtl) return <Box height={1} />
     return (
       <Box flexDirection="row" alignItems="center" columnGap={CELL_GAP} paddingX={1}>
         {limits.map(limit => (
@@ -241,30 +248,32 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
         ))}
         {/* With bars the context bar fills the line and the timer ends it;
             without, the texts follow one another and the timer comes last. */}
-        <Box flexDirection="row" alignItems="center" columnGap={1} flexGrow={showBars ? 1 : 0}>
-          {/* The label and percentage keep their width; the bar gives way. */}
-          <Box flexShrink={0}>
-            <Text dimColor={!isHovered} wrap="truncate">
-              CTX
-            </Text>
-          </Box>
-          {showBars && (
-            <Box flexDirection="row" flexGrow={1} minWidth={4} height={1} alignItems="center">
-              {bar(draw, current, TRACK, RESERVE)}
-            </Box>
-          )}
-          <Box flexShrink={0}>
-            <Text wrap="truncate" {...warning(percent)}>{`${percent}%`}</Text>
-          </Box>
-          {showDetail && (
-            <Box marginLeft={1} flexShrink={0}>
-              <Text dimColor wrap="truncate">
-                {detail}
+        {showCtx && (
+          <Box flexDirection="row" alignItems="center" columnGap={1} flexGrow={showBars ? 1 : 0}>
+            {/* The label and percentage keep their width; the bar gives way. */}
+            <Box flexShrink={0}>
+              <Text dimColor={!isHovered} wrap="truncate">
+                CTX
               </Text>
             </Box>
-          )}
-        </Box>
-        {timer}
+            {showBars && (
+              <Box flexDirection="row" flexGrow={1} minWidth={4} height={1} alignItems="center">
+                {bar(draw, current, TRACK, RESERVE)}
+              </Box>
+            )}
+            <Box flexShrink={0}>
+              <Text wrap="truncate" {...warning(percent)}>{`${percent}%`}</Text>
+            </Box>
+            {showDetail && (
+              <Box marginLeft={1} flexShrink={0}>
+                <Text dimColor wrap="truncate">
+                  {detail}
+                </Text>
+              </Box>
+            )}
+          </Box>
+        )}
+        {showTtl && timer}
       </Box>
     )
   }
@@ -278,16 +287,20 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
       // module's 30-second readings rather than the frame clock.
       detail: countdown(limit.resetsAt, props.nowMs),
     })),
-    {
-      label: 'CTX',
-      bar: bar(draw, current, TRACK, RESERVE),
-      percent,
-      detail: `${short(current.total)} / ${short(current.window)}`,
-    },
+    ...(showCtx
+      ? [
+          {
+            label: 'CTX',
+            bar: bar(draw, current, TRACK, RESERVE),
+            percent,
+            detail: `${short(current.total)} / ${short(current.window)}`,
+          },
+        ]
+      : []),
   ]
   const labelWidth = Math.max(3, ...rows.map(row => row.label.length)) + SLACK
   const showDetail = surface.columns >= DETAIL_MIN_COLUMNS
-  const detailWidth = Math.max(...rows.map(row => row.detail.length)) + SLACK
+  const detailWidth = Math.max(0, ...rows.map(row => row.detail.length)) + SLACK
   const legend = current.slices.filter(s => s.kind === 'used').sort((a, b) => b.tokens - a.tokens)
   // A legend swatch: a 2-cell bar, drawn the way the bars are.
   const swatch = (color: string) => (
@@ -325,38 +338,42 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
           )}
         </Box>
       ))}
-      <Box flexDirection="row" flexWrap="wrap" alignItems="center" columnGap={3} paddingLeft={labelWidth + 2}>
-        {legend.map(slice => (
-          <Box key={slice.label} flexDirection="row" alignItems="center" columnGap={1} flexShrink={0}>
-            {swatch(slice.color)}
-            <Text dimColor>{`${LEGEND[slice.label] ?? slice.label} ${short(slice.tokens)}`}</Text>
-          </Box>
-        ))}
-      </Box>
-      <Box flexDirection="row" alignItems="center" columnGap={2}>
-        <Box width={labelWidth} flexShrink={0}>
-          <Text dimColor wrap="truncate">
-            TTL
-          </Text>
+      {showCtx && (
+        <Box flexDirection="row" flexWrap="wrap" alignItems="center" columnGap={3} paddingLeft={labelWidth + 2}>
+          {legend.map(slice => (
+            <Box key={slice.label} flexDirection="row" alignItems="center" columnGap={1} flexShrink={0}>
+              {swatch(slice.color)}
+              <Text dimColor>{`${LEGEND[slice.label] ?? slice.label} ${short(slice.tokens)}`}</Text>
+            </Box>
+          ))}
         </Box>
-        <Box flexShrink={0}>
-          <Text>{timerText(cache, now, isWorking)}</Text>
-        </Box>
-        {chip('keep-warm', warmLabel, timerFill, 'keep-warm')}
-        {showCaps && (
-          <Box flexShrink={0} marginLeft={1}>
-            <Text dimColor>{capsLine(keepWarm, cache, now)}</Text>
-          </Box>
-        )}
-        {showCaps && chip('refresh-caps', 'Refresh Caps', CHIP_OFF, 'refresh-caps')}
-        {note !== '' && (
-          <Box flexShrink={1} minWidth={0}>
+      )}
+      {showTtl && (
+        <Box flexDirection="row" alignItems="center" columnGap={2}>
+          <Box width={labelWidth} flexShrink={0}>
             <Text dimColor wrap="truncate">
-              {note}
+              TTL
             </Text>
           </Box>
-        )}
-      </Box>
+          <Box flexShrink={0}>
+            <Text>{timerText(cache, now, isWorking)}</Text>
+          </Box>
+          {chip('keep-warm', warmLabel, timerFill, 'keep-warm')}
+          {showCaps && (
+            <Box flexShrink={0} marginLeft={1}>
+              <Text dimColor>{capsLine(keepWarm, cache, now)}</Text>
+            </Box>
+          )}
+          {showCaps && chip('refresh-caps', 'Refresh Caps', CHIP_OFF, 'refresh-caps')}
+          {note !== '' && (
+            <Box flexShrink={1} minWidth={0}>
+              <Text dimColor wrap="truncate">
+                {note}
+              </Text>
+            </Box>
+          )}
+        </Box>
+      )}
     </Box>
   )
 }
@@ -429,15 +446,27 @@ function meter(draw: Draw, percentUsed: number) {
 // Which of the collapsed line's extras fit: the detail, then the usage
 // meters. Counted in cells, the bar's room being what is left after the
 // padding, labels, percentages, gaps and the timer; the desktop's
-// proportional text measures a little wider, which the bar absorbs.
-function fit(columns: number, limits: Limit[], percent: number, detail: string, showBars: boolean) {
+// proportional text measures a little wider, which the bar absorbs. Without
+// the context there is no bar to keep room for: the meters need only fit.
+function fit(
+  columns: number,
+  limits: Limit[],
+  percent: number,
+  detail: string,
+  showBars: boolean,
+  showCtx: boolean,
+  showTtl: boolean,
+) {
   const usage = limits.reduce(
     (n, limit) => n + label(limit).length + 1 + `${Math.round(limit.percentUsed)}%`.length + CELL_GAP,
     0,
   )
-  const base = 2 + usage + 'CTX'.length + 1 + 1 + `${percent}%`.length + TIMER_CELLS
-  const withDetail = base + 2 + detail.length
-  const withMeters = withDetail + limits.length * (METER_WIDTH + 1)
+  const meters = limits.length * (METER_WIDTH + 1)
+  const base = 2 + usage + (showTtl ? TIMER_CELLS : 0)
+  if (!showCtx) return { showDetail: false, showMeters: showBars && columns - (base + meters) >= 0 }
+  const withCtx = base + 'CTX'.length + 1 + 1 + `${percent}%`.length
+  const withDetail = withCtx + 2 + detail.length
+  const withMeters = withDetail + meters
   // Without bars there is no context bar to keep room for, and no meters.
   const showDetail = columns - withDetail >= (showBars ? BAR_MIN : 0)
   const showMeters = showBars && showDetail && columns - withMeters >= METERS_BAR_MIN

@@ -29,6 +29,11 @@ export type SnapshotWindow = {
 // the collapsed line with its bars, the collapsed line without them.
 export type View = 'expanded' | 'bars' | 'plain'
 
+// A part of the band the settings panel can hide: the 5-hour and weekly
+// windows, any other window (a model's allowance, a spend limit), the context
+// and the prompt cache's TTL row.
+export type Part = '5H' | 'WK' | 'other' | 'CTX' | 'TTL'
+
 // The prompt cache's time to live, as Claude Code requests it.
 export type Ttl = '5m' | '1h'
 
@@ -137,6 +142,8 @@ export type BandProps = {
   cache: CacheState
   keepWarm: KeepWarm
   surface: 'terminal' | 'desktop' | 'mobile' | 'vscode'
+  // The parts the settings panel hides.
+  hidden: Part[]
 }
 
 declare module 'claude-code' {
@@ -154,6 +161,8 @@ declare module 'claude-code' {
       // When the ping now out was sent, or null with none out: a second ping
       // waits for it, across a reload too.
       pingingSince: number | null
+      // The parts of the band the settings panel hides; saved across sessions.
+      hidden: Part[]
     }
   }
 }

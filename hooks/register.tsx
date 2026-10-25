@@ -30,7 +30,10 @@
 //   lays itself out to the room it is given and reports clicks.
 // ui.message: the band was clicked: { action: 'cycle' } (right click) moves
 //   to the next view, { action: 'keep-warm' } (the timer or the keep-warm
-//   button) toggles keep-warm, { action: 'refresh-caps' } starts its caps over.
+//   button) toggles keep-warm, { action: 'refresh-caps' } starts its caps over,
+//   and the ☰ button beside the band opens the settings panel.
+// ui.render (Pane, the settings panel): which parts of the band show. Hiding
+//   the TTL row turns keep-warm off, so nothing spends out of sight.
 //
 // A reading is $.session.usage({ breakdown: 'summary' }): the /context rows,
 // estimated locally, so it costs no token-count request, and the plan's
@@ -49,7 +52,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, ModelForkResult, Register, Timer } from 'claude-code'
 
-import type { BandProps, Limit, Reading, Slice, Snapshot, TtlInputs, View } from '../types'
+import type { BandProps, Limit, Part, Reading, Slice, Snapshot, TtlInputs, View } from '../types'
 import {
   BACKGROUND_ORIGINS,
   COLD_READ_SHARE,
@@ -69,7 +72,7 @@ import {
   refreshMs,
   resolveTtl,
 } from './cache'
-import { hmmss, label, readingLine, short, sorted } from './format'
+import { PARTS, hmmss, isPart, label, partOf, readingLine, short, sorted } from './format'
 
 const reading = atom({ plugin: 'token-watch', key: 'reading' } as const, null)
 const isShown = atom({ plugin: 'token-watch', key: 'isShown' } as const, true)
@@ -81,6 +84,17 @@ const ttlInputs = atom({ plugin: 'token-watch', key: 'ttlInputs' } as const, NO_
 const cache = atom({ plugin: 'token-watch', key: 'cache' } as const, NO_CACHE)
 const keepWarm = atom({ plugin: 'token-watch', key: 'keepWarm' } as const, KEEP_WARM_OFF)
 const pingingSince = atom({ plugin: 'token-watch', key: 'pingingSince' } as const, null)
+const hidden = atom({ plugin: 'token-watch', key: 'hidden' } as const, [])
+
+// The settings panel's pane id, and its width when docked beside the transcript.
+const SETTINGS = 'token-watch-settings'
+const SETTINGS_COLUMNS = 44
+
+// The settings button's label, a "menu" glyph: \u2630 (U+2630) on the desktop; in
+// a terminal \u2261 (U+2261), since recent Unicode makes the trigram \u2630 two cells
+// wide while fonts draw it in one, which leaves a gap before the bracket.
+const MENU = '\u2630'
+const MENU_TERMINAL = '\u2261'
 
 // /context's row names, shortened for the legend.
 const LABELS: Record<string, string> = {
@@ -132,13 +146,16 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'context-bar',
       description:
-        'Show or hide the Token Watch band (plan usage, context and the prompt cache countdown) above the prompt; right-click it to cycle its views; "text" for the reading as a line, "file" for the usage snapshot',
-      argumentHint: '[text|file]',
+        'Show or hide the Token Watch band (plan usage, context and the prompt cache countdown) above the prompt; right-click it to cycle its views; "text" for the reading as a line, "file" for the usage snapshot, "settings" for the settings panel',
+      argumentHint: '[text|file|settings]',
     })
     const shown = await $.store.get('isShown')
     await update($, isShown, () => shown !== false)
     const restored = await restoreView($)
     await update($, view, () => restored)
+    const savedHidden = await $.store.get('hidden')
+    const parts: Part[] = Array.isArray(savedHidden) ? savedHidden.filter(isPart) : []
+    await update($, hidden, () => parts)
     await tick($)
     // A new session has no usage windows until its first response, so start
     // from the last ones seen; any whose reset time has passed is drawn at 0%,
@@ -246,8 +263,12 @@ export const register: Register = (on, options) => {
     if (arg === 'file') {
       return { text: await snapshotStatus($) }
     }
+    if (arg === 'settings') {
+      const { isPlaced } = await openSettings($)
+      return { text: isPlaced ? 'Token Watch settings opened.' : 'Token Watch settings: no surface here can show the panel.' }
+    }
     if (arg !== '' && arg !== 'text') {
-      return { text: 'Usage: /context-bar [text|file]' }
+      return { text: 'Usage: /context-bar [text|file|settings]' }
     }
     // The band draws on the terminal and the desktop app alone. Elsewhere
     // (the VS Code extension's chat panel, a headless run) a bare
@@ -297,6 +318,49 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  // The settings panel: a toggle per part of the band, in the order the band
+  // draws them, "[○] 5H: 5-hour window". The Button is the mark alone; the
+  // names sit in a column of their own so the descriptions line up, and a
+  // long description wraps under itself. A docked pane, so it stays beside the
+  // transcript while the band changes under it.
+  on('ui.render', { component: 'Pane', requestId: SETTINGS }, async ($, e) => {
+    const { Box, Text, Button } = $.ui.resolve(e)
+    const off = await read($, hidden)
+    // Shown or hidden: ☑ / ☐ in the desktop's native button; [●] / [○] in a
+    // terminal, bracketed with no spaces, where ☑ may draw as a wide emoji.
+    const isTerminal = e.surface === 'terminal'
+    const mark = (isShown: boolean) =>
+      isTerminal ? `[${isShown ? '●' : '○'}]` : isShown ? '☑' : '☐'
+    // The name column: the longest name and its colon, and on the desktop a
+    // cell of slack for its proportional font.
+    const nameWidth = Math.max(...PARTS.map(([, name]) => name.length)) + (isTerminal ? 1 : 2)
+    return (
+      <Box flexDirection="column" rowGap={1} paddingX={1}>
+        <Text bold>Show in the band</Text>
+        <Box flexDirection="column">
+          {PARTS.map(([part, name, what]) => (
+            <Box key={part} flexDirection="row" columnGap={1}>
+              <Button key={`part-${part}`} plain={isTerminal || undefined} onPress={() => togglePart($, part)}>
+                {mark(!off.includes(part))}
+              </Button>
+              <Box width={nameWidth} flexShrink={0}>
+                <Text>{`${name}:`}</Text>
+              </Box>
+              <Box flexShrink={1} minWidth={0}>
+                <Text dimColor wrap="wrap">
+                  {what}
+                </Text>
+              </Box>
+            </Box>
+          ))}
+        </Box>
+        <Text dimColor wrap="wrap">
+          Hiding TTL turns keep-warm off. /context-bar settings opens this panel again.
+        </Text>
+      </Box>
+    )
+  })
+
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const now = await read($, reading)
     if (e.props.hasSurvey || now === null || !(await read($, isShown))) {
@@ -308,23 +372,50 @@ export const register: Register = (on, options) => {
     const below = await next(e)
     // The band is a Client, which only the terminal and the desktop app draw.
     if (e.surface !== 'terminal' && e.surface !== 'desktop') return below
-    const { Box, Client } = $.ui.resolve(e)
+    const { Box, Button, Client, Text } = $.ui.resolve(e)
     const clock = await read($, nowMs)
+    const off = await read($, hidden)
+    const shown = current(await read($, limits), clock).filter(w => !off.includes(partOf(w)))
+    const bandView = await read($, view)
     const props: BandProps = {
       reading: now,
       limits: current(await read($, limits), clock),
       nowMs: clock,
-      view: await read($, view),
+      view: bandView,
       isWorking: e.props.isWorking || (await read($, working)),
       cache: await read($, cache),
       keepWarm: await read($, keepWarm),
       surface: e.surface,
+      hidden: await read($, hidden),
     }
 
+    // The settings button sits outside the band, at its bottom right: a press
+    // on a Button inside a Client reaches the hooks module as a message, which
+    // the engine does not count as the person's own, and an unasked pane opens
+    // only on a terminal 144 columns wide. Drawn in the expanded view, and in
+    // a collapsed one with every part hidden, where it is the way back.
+    const nothingShown = shown.length === 0 && off.includes('CTX') && off.includes('TTL')
+    const hasMenu = bandView === 'expanded' || nothingShown
     return (
       <Box flexDirection="column">
         {below}
-        <Client key="band" module="./band.tsx" props={props} width="100%" />
+        <Box flexDirection="row" columnGap={1}>
+          <Box flexGrow={1} minWidth={0}>
+            <Client key="band" module="./band.tsx" props={props} width="100%" />
+          </Box>
+          {/* On the band's second line, under the terminal's [-] (which sits in
+              a margin no mod draws in), bracketed like it with no spaces: the
+              terminal's own "[ label ]" would be twice as wide. The desktop
+              draws its native button around the glyph. */}
+          {hasMenu && (
+            <Box flexDirection="column" flexShrink={0}>
+              <Text> </Text>
+              <Button key="settings" plain onPress={() => void openSettings($)}>
+                {e.surface === 'terminal' ? `[${MENU_TERMINAL}]` : MENU}
+              </Button>
+            </Box>
+          )}
+        </Box>
       </Box>
     )
   })
@@ -449,9 +540,31 @@ async function rebase($: EngineInterface) {
   await update($, cache, c => ({ ...c, lastResponseAt: now, warmUntil: now + TTL_MS[c.ttl], windowMs: TTL_MS[c.ttl] }))
 }
 
+// The settings panel, docked beside the transcript where the surface docks
+// panes (opened inline where it does not).
+async function openSettings($: EngineInterface) {
+  return $.ui.open({ id: SETTINGS, title: 'Token Watch', columns: SETTINGS_COLUMNS })
+}
+
+// A part of the band shown or hidden, and saved. Hiding the TTL row turns
+// keep-warm off: its controls go with the row, and nothing should spend out
+// of sight.
+async function togglePart($: EngineInterface, part: Part) {
+  const off = await read($, hidden)
+  const next = off.includes(part) ? off.filter(p => p !== part) : [...off, part]
+  await update($, hidden, () => next)
+  await $.store.set('hidden', next)
+  if (part === 'TTL' && next.includes('TTL') && (await read($, keepWarm)).on) {
+    await stopKeepWarm($, null)
+    await writeSnapshot($)
+  }
+}
+
 // Either button: keep-warm on, when there is a warm cache to keep (or a turn
 // is making one), else off. Pressed with nothing warm to keep, a note says so.
+// Not while the TTL row is hidden (a press from a band drawn before it was).
 async function toggleKeepWarm($: EngineInterface) {
+  if ((await read($, hidden)).includes('TTL')) return
   await tick($)
   const now = await read($, nowMs)
   const k = await read($, keepWarm)

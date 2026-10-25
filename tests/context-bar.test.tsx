@@ -1297,7 +1297,7 @@ describe('context-bar as text', () => {
       expect((await run($, 'text')).text).toBe(LINE)
       expect(await band()).toContain('"CTX"')
       expect(saved.get('isShown')).toBeUndefined()
-      expect((await run($, 'nonsense')).text).toBe('Usage: /context-bar [text|file]')
+      expect((await run($, 'nonsense')).text).toBe('Usage: /context-bar [text|file|settings]')
       expect((await run($, '')).text).toBe('Token Watch hidden.')
     })
   }

@@ -2,7 +2,7 @@
 // spells its figures, so the band, the /context-bar reading and the usage
 // snapshot all say the same thing.
 
-import type { CacheState, KeepWarm, Limit, Reading } from '../types'
+import type { CacheState, KeepWarm, Limit, Part, Reading } from '../types'
 import { TTL_MS, caps, refreshMs } from './cache'
 
 // Usage windows by kind, in the order they are shown; any other window the
@@ -26,6 +26,25 @@ const MODELS: [RegExp, string][] = [
 export function sorted(list: Limit[]) {
   const rank = (kind: string) => (ORDER.includes(kind) ? ORDER.indexOf(kind) : ORDER.length)
   return [...list].sort((a, b) => rank(a.kind) - rank(b.kind))
+}
+
+// The part of the band a usage window belongs to, for the settings panel.
+export function partOf(limit: Limit): Part {
+  return limit.kind === 'five_hour' ? '5H' : limit.kind === 'seven_day' ? 'WK' : 'other'
+}
+
+// The parts in the order the settings panel lists them: each with the name
+// the panel gives it and what it is.
+export const PARTS: [Part, string, string][] = [
+  ['5H', '5H', '5-hour window'],
+  ['WK', 'WK', 'Weekly window'],
+  ['other', 'OTH', 'Other windows (model allowances, spend limit)'],
+  ['CTX', 'CTX', 'Context window'],
+  ['TTL', 'TTL', 'Prompt cache countdown and keep-warm'],
+]
+
+export function isPart(value: unknown): value is Part {
+  return PARTS.some(([part]) => part === value)
 }
 
 export function label(limit: Limit) {
