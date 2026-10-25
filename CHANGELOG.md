@@ -8,15 +8,14 @@ A settings panel: choose what the band shows, and set keep-warm's caps.
 
 ### Added
 
-- **Settings panel:** opened by a `[≡]` button at the band's bottom right (☰ on the desktop, in the expanded view) or `/context-bar settings`. It docks beside the transcript where the terminal docks panes, opens inline on its main screen, and sits beside the chat on the desktop.
-- **Show in the band:** toggles for 5H, WK, other windows (OTH), CTX and TTL, applied to every view and saved. Hiding CTX takes its legend; hiding TTL takes the timer and keep-warm's buttons and turns keep-warm off. With every part hidden, the `[≡]` button stays.
-- **Keep-warm caps:** minus and plus steppers for this session's TTL, within bounds (1 to 24 pings and hours on the hour; 5 to 100 pings in steps of 5 and 1 to 6 hours on five minutes), and `Reset` to the defaults. Saved, and a running keep-warm keeps to new caps from its next ping. The band, `/context-bar text` and the snapshot's `maxPings` and `maxMs` follow them.
+- **Settings panel:** opened by `/context-bar settings` or a `[≡]` button beside the expanded band (☰ on the desktop). It docks beside the transcript where the terminal docks panes, opens inline on its main screen, and sits beside the chat on the desktop.
+- **Show in the band:** toggles for 5H, WK, other windows (OTH), CTX and TTL, applied to every view and saved. Hiding CTX takes its legend; hiding TTL takes the timer and keep-warm's buttons, turns keep-warm off and keeps it off while TTL is hidden, a reload included. With every part hidden, the `[≡]` button stays.
+- **Keep-warm caps:** minus and plus steppers for this session's TTL, within bounds (1 to 24 pings and hours on the hour; 5 to 100 pings in steps of 5 and 1 to 6 hours on five minutes), and `Reset` to the defaults. Saved; a running keep-warm already past a new cap stops at once. The band and `/context-bar text` follow them.
 
 ### Changed
 
 - `/context-bar` takes `settings`.
-- The snapshot's keep-warm caps follow the settings panel.
-- `tsconfig.json` also reports unused locals.
+- The snapshot's keep-warm caps (`maxPings`, `maxMs`) follow the settings panel.
 
 ## 1.2.0 (2026-10-25)
 

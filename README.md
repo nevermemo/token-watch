@@ -22,7 +22,7 @@ Expanded:
 
 ```text
 ╭───────────────────────────────────────────────────────────────────╮
-│ 5H   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄  62%  2h 14m    │
+│ 5H   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄  62%  2h 14m    │ [≡]
 │ WK   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄  31%  3d 4h     │
 │ CTX  ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄  21%  212k / 1M │
 │      ▄ messages 186k   ▄ tools 12k   ▄ memory 4.9k   ▄ skills 3k  │
@@ -138,12 +138,12 @@ claude plugin uninstall token-watch@token-watch
 - **`/context-bar text`** answers with that line anywhere.
 - **`/context-bar file`** says where the usage snapshot is and when it was last written.
 - **Click `[≡]`** beside the band (☰ on the desktop), or type **`/context-bar settings`**, to open the [settings panel](#the-settings-panel).
-- **Saved choices:** the view, shown or hidden, the parts shown and keep-warm's caps are kept across sessions; keep-warm itself is not.
+- **Saved choices:** the view, whether the band is shown, which parts it shows and keep-warm's caps are kept across sessions; keep-warm itself is not.
 - **Narrow windows:** the collapsed line never wraps. As the window narrows, the small usage bars drop first, then the `212k / 1M` detail. The percentages and the timer always stay.
 
 ## The settings panel
 
-A panel beside the transcript (docked in the terminal's fullscreen layout, inline on its main screen, beside the chat on the desktop). Open it with the `[≡]` button at the band's bottom right, shown in the expanded view, or with `/context-bar settings`. Every change applies at once and is saved.
+The panel docks beside the transcript in the terminal's fullscreen layout and beside the chat on the desktop; on the terminal's main screen it opens inline. Open it with the `[≡]` button beside the expanded band, or with `/context-bar settings`. Every change applies at once and is saved.
 
 ```text
 Show in the band
@@ -161,8 +161,8 @@ Hours: [-]   8 [+]
        [Reset]
 ```
 
-- **Show in the band:** each toggle shows or hides a part in every view. Hiding CTX takes its legend too. Hiding TTL takes the timer and keep-warm's buttons, and **turns keep-warm off**, so nothing spends out of sight. With every part hidden, the band keeps the `[≡]` button, so you can always get back.
-- **Keep-warm caps:** the caps for this session's TTL, one step at a time within bounds. A running keep-warm keeps to new caps from its next ping. `Reset` restores the defaults.
+- **Show in the band:** each toggle shows or hides a part in every view. Hiding CTX takes its legend too. Hiding TTL takes the timer and keep-warm's buttons, **turns keep-warm off** and keeps it off while TTL is hidden, so nothing spends out of sight. With every part hidden, the band keeps the `[≡]` button, so you can always get back. `/context-bar text` and the snapshot still carry every part.
+- **Keep-warm caps:** the caps for this session's TTL (see [The prompt cache and keep-warm](#the-prompt-cache-and-keep-warm)), one step at a time within bounds. A running keep-warm already past a new cap stops at once, saying why. `Reset` restores the defaults for both TTLs.
 
   | TTL | Default | Pings | Hours |
   |-----|---------|-------|-------|
@@ -274,7 +274,7 @@ You can check this yourself before installing: `claude plugin validate ./token-w
   - `$.command.register`: adds `/context-bar`.
   - `$.ui.open`: opens the settings panel, when you click `[≡]` or type `/context-bar settings`.
   - `$.store`: remembers your choices and the last usage seen. `$.store.delete` removes the 1.1 keys once migrated.
-  - `$.state` and `$.ui.resolve`: share data between the mod's hooks and draw the band.
+  - `$.state` and `$.ui.resolve`: share data between the mod's hooks and draw the band and the settings panel.
   - `$.env.get` (`USERPROFILE`, `HOME`, `FORCE_PROMPT_CACHING_5M`, `CLAUDE_CODE_PROMPT_CACHE_TTL`, `ENABLE_PROMPT_CACHING_1H`): your home directory and the prompt cache's TTL controls. Nothing else is read from the environment.
   - `$.fs.write` and `$.fs.stat`: write the snapshot and check its timestamp. No other file is written, and no file is read.
 
@@ -305,7 +305,7 @@ Keep-warm is never saved. The snapshot file is described [above](#the-usage-snap
 | `prompt.submit` | A prompt from you turns keep-warm off; background deliveries do not; the text passes through unread. |
 | `session.compact`, `session.end` | Compaction stops keep-warm and restarts the countdown (a precompute changes nothing). The session ending stops keep-warm; after `/clear`, a resume or a logout the cache is forgotten. |
 | `command.run` (`context-bar`) | Shows or hides the band where it draws; answers with the reading as text where nothing draws, with `text`, or with the snapshot's path with `file`; opens the settings panel with `settings`. |
-| `ui.render` (`AbovePrompt`) | Draws the band as a client module ([`hooks/band.tsx`](hooks/band.tsx)). The band lays itself out to the available width and reports clicks. Other mods drawing above the prompt keep their place; Token Watch adds its band beneath theirs. Beside it, the `[≡]` button: a press on a button inside the band's own drawing does not count as yours, and a pane you didn't ask for opens only on a terminal 144 columns wide. |
+| `ui.render` (`AbovePrompt`) | Draws the band as a client module ([`hooks/band.tsx`](hooks/band.tsx)). The band lays itself out to the available width and reports clicks. Other mods drawing above the prompt keep their place; Token Watch adds its band beneath theirs. It draws the `[≡]` button itself, outside the client module: Claude Code doesn't count a press inside a client module as yours, and opens a pane you didn't ask for only on a terminal 144 columns wide. |
 | `ui.render` (`Pane`) | Draws the settings panel: the parts' toggles and keep-warm's caps. |
 | `ui.message` | Receives the clicks: a right click moves to the next view, the timer or the keep-warm button toggles keep-warm, `Refresh Caps` starts its caps over. |
 
@@ -357,7 +357,7 @@ npx -p typescript tsc -p .
 - the text reply where nothing draws (the VS Code chat panel, headless),
 - the usage snapshot: its content, the heartbeat, several sessions, the off switch,
 - the TTL row: its countdown, the buttons' chips, labels and colours, the terminal's fixed-width label, a band drawn again, Refresh Caps,
-- the settings panel: its button and command, each part hidden in every view and saved, hiding TTL turning keep-warm off, every part hidden, the caps' steppers, bounds, reset and restore, and keep-warm stopping at the caps it set,
+- the settings panel: its button and command (and closing a panel no surface can show), each part hidden in every view and saved, hiding TTL turning keep-warm off and keeping it off across a reload, every part hidden, the caps' steppers on both TTLs, their bounds, reset and restore, keep-warm stopping at the caps it set, and stopping at once when a cap drops below what it has used,
 - keep-warm, with a mocked clock and a stubbed fork: its schedule, its caps, every stop condition, a ping held open (no second ping while one is out), a ping that never answers, failures counted while a retry is out, subagent turns, precompute, every way a session ends, an empty reply, the TTL's precedence, and the snapshot's cache object.
 
 **Seeing your edits:**

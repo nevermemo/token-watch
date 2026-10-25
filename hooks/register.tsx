@@ -5,10 +5,10 @@
 // off, and /context-bar shows or hides it.
 //
 // session.start: register /context-bar, restore the saved view (or the one
-//   the 1.1 keys meant) and the last usage windows seen (a new session has
-//   none until its first response), read the TTL controls once (three
-//   environment variables and the promptCacheTtl setting), take a reading,
-//   and tick a clock every 30s
+//   the 1.1 keys meant), the parts the settings panel hides, keep-warm's caps
+//   and the last usage windows seen (a new session has none until its first
+//   response), read the TTL controls once (three environment variables and
+//   the promptCacheTtl setting), take a reading, and tick a clock every 30s
 //   so the countdowns stay current and the usage snapshot says the session
 //   is alive.
 // session.measure: after each main-thread turn, or when a usage window moves,
@@ -25,16 +25,18 @@
 // command.run (context-bar): show or hide the band where it draws; where it
 //   cannot be drawn (the VS Code extension's chat panel, a headless run),
 //   answer with the reading as one line of text. `text` asks for that line
-//   anywhere, `file` for the snapshot's path.
+//   anywhere, `file` for the snapshot's path, `settings` opens the settings
+//   panel.
 // ui.render (AbovePrompt): the band, drawn by the Client in ./band.tsx, which
-//   lays itself out to the room it is given and reports clicks.
+//   lays itself out to the room it is given and reports clicks; beside it, the
+//   settings button ([≡] in a terminal, ☰ on the desktop), a Button of this
+//   module's own, so its press is the person's.
 // ui.message: the band was clicked: { action: 'cycle' } (right click) moves
 //   to the next view, { action: 'keep-warm' } (the timer or the keep-warm
-//   button) toggles keep-warm, { action: 'refresh-caps' } starts its caps over,
-//   and the ☰ button beside the band opens the settings panel.
+//   button) toggles keep-warm, { action: 'refresh-caps' } starts its caps over.
 // ui.render (Pane, the settings panel): which parts of the band show, and
-//   keep-warm's caps for this session's TTL. Hiding the TTL row turns
-//   keep-warm off, so nothing spends out of sight.
+//   keep-warm's caps for this session's TTL. While the TTL row is hidden
+//   keep-warm stays off, so nothing spends out of sight.
 //
 // A reading is $.session.usage({ breakdown: 'summary' }): the /context rows,
 // estimated locally, so it costs no token-count request, and the plan's
@@ -46,14 +48,15 @@
 // Keep-warm: a ping is $.model.fork with a one-word prompt, which repeats the
 // main thread's last request so the API serves it from the cache and
 // refreshes the entry. Pings go out a lead time before the believed expiry,
-// never during a turn and never two at once, and stop at the caps, when the person types, after
-// two failures in a row, when a ping finds the cache cold, at compaction and
-// when the session ends. The rules are in ./cache.ts.
+// never during a turn, never two at once and never while the TTL row is
+// hidden, and stop at the caps, when the person types, after two failures in
+// a row, when a ping finds the cache cold, at compaction and when the session
+// ends. The rules are in ./cache.ts.
 
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, ModelForkResult, Register, Timer } from 'claude-code'
 
-import type { BandProps, CapSetting, Limit, Part, Reading, Slice, Snapshot, TtlInputs, View } from '../types'
+import type { BandProps, Cap, CapSetting, KeepWarm, Limit, Part, Reading, Slice, Snapshot, TtlInputs, View } from '../types'
 import {
   BACKGROUND_ORIGINS,
   CAP_LIMITS,
@@ -96,8 +99,8 @@ const capSettings = atom({ plugin: 'token-watch', key: 'caps' } as const, DEFAUL
 const SETTINGS = 'token-watch-settings'
 const SETTINGS_COLUMNS = 44
 
-// The settings button's label, a "menu" glyph: \u2630 (U+2630) on the desktop; in
-// a terminal \u2261 (U+2261), since recent Unicode makes the trigram \u2630 two cells
+// The settings button's label, a "menu" glyph: U+2630 on the desktop; in a
+// terminal U+2261, since recent Unicode makes the trigram U+2630 two cells
 // wide while fonts draw it in one, which leaves a gap before the bracket.
 const MENU = '\u2630'
 const MENU_TERMINAL = '\u2261'
@@ -181,8 +184,16 @@ export const register: Register = (on, options) => {
     await takeReading($)
     $.clock.every(HEARTBEAT_MS, () => void tick($).then(() => heartbeat($)).catch(() => {}))
     // The ping timer is a module variable a hot reload drops, while
-    // keep-warm's state lives in $.state: arm it again.
-    if ((await read($, keepWarm)).on) await schedule($)
+    // keep-warm's state lives in $.state: arm it again. Unless the TTL row is
+    // now hidden (another session, sharing the store, hid it): then off.
+    if ((await read($, keepWarm)).on) {
+      if (parts.includes('TTL')) {
+        await stopKeepWarm($, null)
+        await writeSnapshot($)
+      } else {
+        await schedule($)
+      }
+    }
 
     return result
   })
@@ -272,8 +283,12 @@ export const register: Register = (on, options) => {
       return { text: await snapshotStatus($) }
     }
     if (arg === 'settings') {
-      const { isPlaced } = await openSettings($)
-      return { text: isPlaced ? 'Token Watch settings opened.' : 'Token Watch settings: no surface here can show the panel.' }
+      const opened = await openSettings($)
+      if (opened.isPlaced) return { text: 'Token Watch settings opened.' }
+      // Not placed: close it rather than leave it waiting, undrawn, for a
+      // surface that would show it later unasked.
+      await $.ui.close({ id: SETTINGS }).catch(() => {})
+      return { text: `Token Watch settings: the panel can't be shown here (${opened.reason}).` }
     }
     if (arg !== '' && arg !== 'text') {
       return { text: 'Usage: /context-bar [text|file|settings]' }
@@ -338,8 +353,7 @@ export const register: Register = (on, options) => {
     // Shown or hidden: ☑ / ☐ in the desktop's native button; [●] / [○] in a
     // terminal, bracketed with no spaces, where ☑ may draw as a wide emoji.
     const isTerminal = e.surface === 'terminal'
-    const mark = (isShown: boolean) =>
-      isTerminal ? `[${isShown ? '●' : '○'}]` : isShown ? '☑' : '☐'
+    const mark = (isOn: boolean) => (isTerminal ? `[${isOn ? '●' : '○'}]` : isOn ? '☑' : '☐')
     // The name column: the longest name and its colon, and on the desktop a
     // cell of slack for its proportional font.
     const nameWidth = Math.max(...PARTS.map(([, name]) => name.length)) + (isTerminal ? 1 : 2)
@@ -353,7 +367,7 @@ export const register: Register = (on, options) => {
         <Box flexDirection="column">
           {PARTS.map(([part, name, what]) => (
             <Box key={part} flexDirection="row" columnGap={1}>
-              <Button key={`part-${part}`} plain={isTerminal || undefined} onPress={() => togglePart($, part)}>
+              <Button key={`part-${part}`} plain={isTerminal || undefined} onPress={() => void togglePart($, part)}>
                 {mark(!off.includes(part))}
               </Button>
               <Box width={nameWidth} flexShrink={0}>
@@ -384,7 +398,7 @@ export const register: Register = (on, options) => {
                   key={`${which}-down`}
                   plain={isTerminal || undefined}
                   dimColor={value <= min}
-                  onPress={() => stepCaps($, which, -1)}
+                  onPress={() => void stepCaps($, which, -1)}
                 >
                   {isTerminal ? '[-]' : '\u2212'}
                 </Button>
@@ -395,7 +409,7 @@ export const register: Register = (on, options) => {
                   key={`${which}-up`}
                   plain={isTerminal || undefined}
                   dimColor={value >= max}
-                  onPress={() => stepCaps($, which, 1)}
+                  onPress={() => void stepCaps($, which, 1)}
                 >
                   {isTerminal ? '[+]' : '+'}
                 </Button>
@@ -404,13 +418,13 @@ export const register: Register = (on, options) => {
           })}
           <Box flexDirection="row" columnGap={1}>
             <Box width={capWidth} flexShrink={0} />
-            <Button key="caps-reset" plain={isTerminal || undefined} onPress={() => resetCaps($)}>
+            <Button key="caps-reset" plain={isTerminal || undefined} onPress={() => void resetCaps($)}>
               {isTerminal ? '[Reset]' : 'Reset'}
             </Button>
           </Box>
         </Box>
         <Text dimColor wrap="wrap">
-          {`Defaults: ${DEFAULT_CAPS[ttl].pings} pings or ${DEFAULT_CAPS[ttl].hours} hours. A running keep-warm keeps to new caps from its next ping. /context-bar settings opens this panel again.`}
+          {`Defaults: ${DEFAULT_CAPS[ttl].pings} pings or ${DEFAULT_CAPS[ttl].hours} hours. A running keep-warm already past a new cap stops. /context-bar settings opens this panel again.`}
         </Text>
       </Box>
     )
@@ -430,27 +444,27 @@ export const register: Register = (on, options) => {
     const { Box, Button, Client, Text } = $.ui.resolve(e)
     const clock = await read($, nowMs)
     const off = await read($, hidden)
-    const shown = current(await read($, limits), clock).filter(w => !off.includes(partOf(w)))
+    const windows = current(await read($, limits), clock)
     const bandView = await read($, view)
     const props: BandProps = {
       reading: now,
-      limits: current(await read($, limits), clock),
+      limits: windows,
       nowMs: clock,
       view: bandView,
       isWorking: e.props.isWorking || (await read($, working)),
       cache: await read($, cache),
       keepWarm: await read($, keepWarm),
       surface: e.surface,
-      hidden: await read($, hidden),
+      hidden: off,
       cap: await currentCap($),
     }
 
-    // The settings button sits outside the band, at its bottom right: a press
-    // on a Button inside a Client reaches the hooks module as a message, which
-    // the engine does not count as the person's own, and an unasked pane opens
+    // The settings button sits outside the band, beside it: a press on a
+    // Button inside a Client reaches the hooks module as a message, which the
+    // engine does not count as the person's own, and an unasked pane opens
     // only on a terminal 144 columns wide. Drawn in the expanded view, and in
     // a collapsed one with every part hidden, where it is the way back.
-    const nothingShown = shown.length === 0 && off.includes('CTX') && off.includes('TTL')
+    const nothingShown = windows.every(w => off.includes(partOf(w))) && off.includes('CTX') && off.includes('TTL')
     const hasMenu = bandView === 'expanded' || nothingShown
     return (
       <Box flexDirection="column">
@@ -607,19 +621,37 @@ async function currentCap($: EngineInterface) {
   return caps((await read($, cache)).ttl, await read($, capSettings))
 }
 
+// Why keep-warm has reached its caps, as its stop note says it, or null.
+function capReached(k: KeepWarm, cap: Cap, now: number) {
+  if (k.pings >= cap.pings) return `stopped: ${cap.pings} pings`
+  if (k.startedAt !== null && now - k.startedAt >= cap.ms) return `stopped: ${hmmss(cap.ms)} reached`
+  return null
+}
+
 // One of this session's TTL's caps moved a step, or all of them back to the
-// defaults, and saved. A running keep-warm is held to them from its next ping.
+// defaults, and saved. A running keep-warm already past the new caps stops
+// now, saying why, rather than showing "7/5" until its next ping.
 async function stepCaps($: EngineInterface, which: keyof CapSetting, by: 1 | -1) {
   const ttl = (await read($, cache)).ttl
   const next = stepCap(await read($, capSettings), ttl, which, by)
   await update($, capSettings, () => next)
   await $.store.set('caps', next)
-  await writeSnapshot($)
+  await holdToCaps($)
 }
 
 async function resetCaps($: EngineInterface) {
   await update($, capSettings, () => DEFAULT_CAPS)
   await $.store.set('caps', DEFAULT_CAPS)
+  await holdToCaps($)
+}
+
+async function holdToCaps($: EngineInterface) {
+  const k = await read($, keepWarm)
+  if (k.on) {
+    await tick($)
+    const reached = capReached(k, await currentCap($), await read($, nowMs))
+    if (reached !== null) await stopKeepWarm($, reached)
+  }
   await writeSnapshot($)
 }
 
@@ -701,6 +733,10 @@ async function arm($: EngineInterface) {
   const k = await read($, keepWarm)
   const c = await read($, cache)
   if (!k.on || c.warmUntil === null || (await read($, working))) return
+  if ((await read($, hidden)).includes('TTL')) {
+    await stopKeepWarm($, null)
+    return await writeSnapshot($)
+  }
   const now = await $.clock.now()
   if (now >= c.warmUntil) return
   const wait = Math.max(MIN_PING_WAIT_MS, c.warmUntil - leadMs(c.windowMs) - now)
@@ -738,12 +774,12 @@ async function ping($: EngineInterface) {
     if (!k.on || c.warmUntil === null || (await read($, working))) return
     await tick($)
     const sentAt = await read($, nowMs)
+    // While the TTL row is hidden keep-warm stays off: however it came to be
+    // on (another session hid the row, a press raced the toggle), it stops here.
+    if ((await read($, hidden)).includes('TTL')) return await stopKeepWarm($, null)
     if (sentAt >= c.warmUntil) return await stopKeepWarm($, 'stopped: cache went cold')
-    const cap = caps(c.ttl, await read($, capSettings))
-    if (k.pings >= cap.pings) return await stopKeepWarm($, `stopped: ${cap.pings} pings`)
-    if (k.startedAt !== null && sentAt - k.startedAt >= cap.ms) {
-      return await stopKeepWarm($, `stopped: ${hmmss(cap.ms)} reached`)
-    }
+    const reached = capReached(k, caps(c.ttl, await read($, capSettings)), sentAt)
+    if (reached !== null) return await stopKeepWarm($, reached)
 
     let result: ModelForkResult | null = null
     let thrown = ''

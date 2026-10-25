@@ -39,6 +39,12 @@
 // Collapsed without bars ('plain'): the line's labels, percentages, detail
 //   and timer alone.
 //
+// The settings panel can hide parts (props.hidden): the 5H and WK windows,
+// any other window, CTX (with its legend) and TTL (with the timer and
+// keep-warm's buttons). A hidden part is left out of every view; with
+// everything hidden the table says so and the collapsed line is empty, the
+// settings button the hooks module draws beside the band being the way back.
+//
 // The collapsed views' timer: the countdown as a Button, "47:12", whose chip
 // is its own indicator (grey with keep-warm off, green on, red with no warm
 // cache). It reads the whole TTL while a turn runs, and "--:--" before the
@@ -316,6 +322,7 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
 
   return (
     <Box flexDirection="column" borderStyle="round" borderDimColor={!isHovered} paddingX={1}>
+      {rows.length === 0 && !showTtl && <Text dimColor>All parts are hidden.</Text>}
       {rows.map(row => (
         <Box key={row.label} flexDirection="row" alignItems="center" columnGap={2}>
           <Box width={labelWidth} flexShrink={0}>

@@ -144,6 +144,8 @@ type Boot = {
   forkGate?: (call: number) => Promise<void> | undefined
   // The last response's counts in the breakdown; none by default.
   apiUsage?: ModelUsage
+  // Why no surface places a pane; every pane is placed by default.
+  paneUnplaced?: string
 }
 
 type Write = { path: string; text: string }
@@ -176,6 +178,7 @@ async function boot($: Engine, on: On, surface: 'terminal' | 'desktop' | null, r
   const writes: Write[] = []
   const forks: string[] = []
   const opens: PaneOpenArgs[] = []
+  const closes: string[] = []
   const saved = new Map<string, unknown>(Object.entries(options.stored ?? {}))
   const clock = mock.clock(on, { now: NOW })
   mock.env(on, options.env ?? { USERPROFILE: 'C:/Users/test' })
@@ -218,7 +221,11 @@ async function boot($: Engine, on: On, surface: 'terminal' | 'desktop' | null, r
   )
   on('ui.open', ($, e) => {
     opens.push({ ...e })
-    return { value: { isPlaced: true } }
+    return { value: options.paneUnplaced ? { isPlaced: false, reason: options.paneUnplaced } : { isPlaced: true } }
+  })
+  on('ui.close', ($, e) => {
+    closes.push(e.id)
+    return { value: undefined }
   })
   on('fs.write', ($, e) => {
     writes.push({ path: e.path, text: e.text })
@@ -226,13 +233,13 @@ async function boot($: Engine, on: On, surface: 'terminal' | 'desktop' | null, r
   })
   await $.session.start({ cwd: '.', surface, isInteractive: true })
 
-  return { writes, saved, clock, forks, opens }
+  return { writes, saved, clock, forks, opens, closes }
 }
 
 // `beneath`: text a mod beneath this one draws in the band, if any.
 // `stored`: what the mod's store holds from earlier sessions.
 async function start($: Engine, on: On, surface: Surface, rateLimits: SessionRateLimit[], beneath?: string, stored?: Record<string, unknown>, options: Boot = {}) {
-  const { writes, saved, clock, forks, opens } = await boot($, on, surface, rateLimits, { ...options, beneath, stored })
+  const { writes, saved, clock, forks, opens, closes } = await boot($, on, surface, rateLimits, { ...options, beneath, stored })
   const ui = await $.ui.mount<Surface, 'AbovePrompt'>({ ...BAND, surface })
   await ui.resize({ columns: 116, rows: 8, in: 'band' })
   const band = async () => JSON.stringify(await ui.drawn({ in: 'band' }))
@@ -240,7 +247,7 @@ async function start($: Engine, on: On, surface: Surface, rateLimits: SessionRat
   // The whole drawing, the settings button beside the band included.
   const tree = async () => JSON.stringify(await ui.drawn())
 
-  return { ui, band, tree, writes, saved, clock, forks, opens }
+  return { ui, band, tree, writes, saved, clock, forks, opens, closes }
 }
 
 // One main-thread turn, started and ended at the clock's time now.
@@ -1401,13 +1408,94 @@ describe('settings panel', () => {
     expect(await band()).toContain('stopped: 5 pings')
   })
 
-  test('saved caps are restored; a value off its stepper or out of bounds falls back to the default', async ($, on) => {
+  test('saved caps are restored; a value off its stepper falls back to the default (five minutes)', async ($, on) => {
     const { writes } = await start($, on, 'terminal', RATE_LIMITS, undefined, {
-      caps: { '5m': { pings: 33, hours: 4 }, '1h': { pings: 99, hours: 'x' } },
+      caps: { '5m': { pings: 33, hours: 4 }, '1h': { pings: 12, hours: 10 } },
     }, FIVE_M)
     await turn($)
     // 33 pings is off the five-minute stepper's grid of 5: the default 30 stands.
     expect(snapshotOf(writes).cache.keepWarm).toMatchObject({ maxPings: 30, maxMs: 4 * 60 * MINUTE })
+  })
+
+  test('saved caps are restored; a value out of bounds or not a number falls back to the default (the hour)', async ($, on) => {
+    const { writes } = await start($, on, 'terminal', RATE_LIMITS, undefined, {
+      caps: { '1h': { pings: 99, hours: 'x' }, '5m': { pings: 40, hours: 3 } },
+    })
+    await turn($)
+    expect(snapshotOf(writes).cache.keepWarm).toMatchObject({ maxPings: 8, maxMs: 8 * 60 * MINUTE })
+  })
+
+  test('saved caps that are not an object are the defaults', async ($, on) => {
+    const { writes } = await start($, on, 'terminal', RATE_LIMITS, undefined, { caps: 'junk' })
+    await turn($)
+    expect(snapshotOf(writes).cache.keepWarm).toMatchObject({ maxPings: 8, maxMs: 8 * 60 * MINUTE })
+  })
+
+  test('on the hour the steppers go 1 to 24 pings and hours, a step of one', async ($, on) => {
+    const { saved } = await start($, on, 'terminal', RATE_LIMITS)
+    await turn($)
+    const { pane, drawn } = await mountPanel($, 'terminal')
+    expect(await drawn()).toContain('Keep-warm caps (1h TTL)')
+    for (let i = 0; i < 8; i++) await pane.press({ key: 'pings-down' })
+    for (let i = 0; i < 17; i++) await pane.press({ key: 'hours-up' })
+    expect(saved.get('caps')).toEqual({ '1h': { pings: 1, hours: 24 }, '5m': { pings: 30, hours: 2 } })
+  })
+
+  test('a running keep-warm already past a lowered ping cap stops at once, saying why', async ($, on) => {
+    const { ui, band, clock, forks } = await start($, on, 'terminal', RATE_LIMITS, undefined, undefined, FIVE_M)
+    await turn($)
+    await ui.press({ key: 'keep-warm' })
+    for (let i = 0; i < 7; i++) await clock.advance(PING_AT)
+    expect(forks.length).toBe(7)
+    const { pane } = await mountPanel($, 'terminal')
+    // 30, 25, 20, 15, 10: still above 7 pings, so keep-warm goes on.
+    for (let i = 0; i < 4; i++) await pane.press({ key: 'pings-down' })
+    expect(await band()).toContain('Pings: 7/10')
+    expect(await band()).toContain(keepWarmOn('terminal'))
+    // 5: below what it has sent. It stops now, not at its next ping.
+    await pane.press({ key: 'pings-down' })
+    const after = await band()
+    expect(after).toContain('stopped: 5 pings')
+    expect(after).toContain(keepWarmOff('terminal'))
+    await clock.advance(10 * MINUTE)
+    expect(forks.length).toBe(7)
+  })
+
+  test('a running keep-warm already past a lowered time cap stops at once', { timeoutMs: 30_000 }, async ($, on) => {
+    const { ui, band, clock, forks } = await start($, on, 'terminal', RATE_LIMITS, undefined, undefined, FIVE_M)
+    await turn($)
+    await ui.press({ key: 'keep-warm' })
+    for (let i = 0; i < 17; i++) await clock.advance(PING_AT)
+    expect(forks.length).toBe(17)
+    const { pane } = await mountPanel($, 'terminal')
+    // On for 63:45 of a two-hour cap; one hour is less than that.
+    await pane.press({ key: 'hours-down' })
+    expect(await band()).toContain('stopped: 1:00:00 reached')
+    await clock.advance(10 * MINUTE)
+    expect(forks.length).toBe(17)
+  })
+
+  test('another session hid TTL in the shared store: on reload keep-warm stops and sends nothing', async ($, on) => {
+    const { ui, saved, clock, forks, writes } = await start($, on, 'terminal', RATE_LIMITS, undefined, undefined, FIVE_M)
+    await turn($)
+    await ui.press({ key: 'keep-warm' })
+    saved.set('hidden', ['TTL'])
+    // A hot reload runs session.start again: $.state keeps keep-warm on.
+    await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true })
+    expect(snapshotOf(writes).cache.keepWarm.on).toBe(false)
+    await clock.advance(10 * MINUTE)
+    expect(forks.length).toBe(0)
+  })
+
+  test('with every part hidden, the expanded band says so', async ($, on) => {
+    const { band } = await start($, on, 'terminal', RATE_LIMITS, undefined, { hidden: ['5H', 'WK', 'other', 'CTX', 'TTL'] })
+    expect(await band()).toContain('All parts are hidden.')
+  })
+
+  test('where no surface places the panel, /context-bar settings closes it and says why', async ($, on) => {
+    const { closes } = await start($, on, 'terminal', RATE_LIMITS, undefined, undefined, { paneUnplaced: 'no-surface' })
+    expect((await run($, 'settings')).text).toBe("Token Watch settings: the panel can't be shown here (no-surface).")
+    expect(closes).toEqual(['token-watch-settings'])
   })
 })
 
