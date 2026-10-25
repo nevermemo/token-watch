@@ -44,8 +44,7 @@
 //
 // Burn rates: each reading's usage windows are kept in the store where they
 // moved (./burn.ts), shared by every session since the windows are the
-// account's, and this session's context totals in $.state; the band shows
-// each window's pace and when it fills, and the readings left to compact.
+// account's; the band shows each window's pace and when it fills.
 //
 // A reading is $.session.usage({ breakdown: 'summary' }): the /context rows,
 // estimated locally, so it costs no token-count request, and the plan's
@@ -117,7 +116,7 @@ import {
   stepBurnWindow,
   stepCap,
 } from './cache'
-import { addContext, addReadings, fullAt, ratePerHour, readHistory, turnsToCompact } from './burn'
+import { addReadings, fullAt, ratePerHour, readHistory } from './burn'
 import { PARTS, hmmss, isPart, label, partOf, readingLine, short, sorted } from './format'
 
 const reading = atom({ plugin: 'token-watch', key: 'reading' } as const, null)
@@ -139,7 +138,6 @@ const scope = atom({ plugin: 'token-watch', key: 'scope' } as const, 'session')
 const burn = atom({ plugin: 'token-watch', key: 'burn' } as const, DEFAULT_BURN)
 const globalBurn = atom({ plugin: 'token-watch', key: 'globalBurn' } as const, DEFAULT_BURN)
 const history = atom({ plugin: 'token-watch', key: 'history' } as const, {})
-const ctxHistory = atom({ plugin: 'token-watch', key: 'ctxHistory' } as const, [])
 
 // The settings panel's pane id, and its width when docked beside the transcript.
 const SETTINGS = 'token-watch-settings'
@@ -672,8 +670,6 @@ async function takeReading($: EngineInterface) {
         compactsAt: breakdown.isAutoCompactEnabled ? (breakdown.autoCompactThreshold ?? null) : null,
       }
       await update($, reading, () => next)
-      const at = await $.clock.now()
-      await update($, ctxHistory, samples => addContext(samples, next.total, at))
       // The last response's prompt, what a warm ping reads most of.
       const api = breakdown.apiUsage
       if (api) {
@@ -954,18 +950,16 @@ async function resetBurn($: EngineInterface, which: keyof Burn) {
 }
 
 // The pace the band shows, now: each window's rate over the burn window and
-// when it fills, and the readings left to compact.
+// when it fills.
 async function paceOf($: EngineInterface, windows: Limit[], now: number): Promise<Pace> {
   const b = await read($, burn)
   const windowMs = b.windowMin * 60_000
   const h = await read($, history)
-  const pace: Pace = { windows: {}, ctxTurns: null, unit: b.unit }
+  const pace: Pace = { windows: {}, unit: b.unit }
   for (const w of windows) {
     const perHour = ratePerHour(h[w.kind]?.samples ?? [], now, windowMs)
     if (perHour !== null) pace.windows[w.kind] = { perHour, fullAt: fullAt(w.percentUsed, perHour, now, w.resetsAt) }
   }
-  const latest = await read($, reading)
-  pace.ctxTurns = turnsToCompact(await read($, ctxHistory), now, windowMs, latest?.compactsAt ?? null)
   return pace
 }
 

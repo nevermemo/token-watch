@@ -41,9 +41,7 @@
 //
 // Burn rates (props.pace): in the table, after a window's reset countdown,
 // its pace ("+12%/h") and, when it would fill before it resets, when ("full
-// in 1h 20m"), and after the context's size the readings left to compact
-// ("~9 turns to compact"), in two more fixed columns so the bars still line
-// up; on the collapsed line a window's pace after its percentage, the first
+// in 1h 20m"), in two more fixed columns so the bars still line up; on the collapsed line a window's pace after its percentage, the first
 // thing the line gives up when it runs out of room.
 //
 // The settings panel can hide parts (props.hidden): the 5H and WK windows,
@@ -334,7 +332,7 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
             percent,
             detail: `${short(current.total)} / ${short(current.window)}`,
             rate: '',
-            forecast: props.pace.ctxTurns === null ? '' : `~${props.pace.ctxTurns} turns to compact`,
+            forecast: '',
           },
         ]
       : []),
@@ -392,7 +390,7 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
           )}
           {showRates && forecastWidth > 0 && (
             <Box width={forecastWidth + SLACK} flexShrink={0}>
-              <Text wrap="truncate" dimColor={row.label === 'CTX'} color={row.label === 'CTX' ? undefined : FORECAST}>
+              <Text wrap="truncate" color={FORECAST}>
                 {row.forecast}
               </Text>
             </Box>

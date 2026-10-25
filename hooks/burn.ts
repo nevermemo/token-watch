@@ -1,7 +1,7 @@
-// Burn rates: how fast each usage window fills and the context grows, from
-// the readings Token Watch already takes, averaged over a window the settings
-// panel sets. Pure functions; the hooks module keeps the readings and the
-// band draws the results.
+// Burn rates: how fast each usage window fills, from the readings Token
+// Watch already takes, averaged over a window the settings panel sets. Pure
+// functions; the hooks module keeps the readings and the band draws the
+// results.
 //
 // A window's percentage is kept only when it moves, so it is a step function:
 // its value at any moment is the newest sample at or before that moment. The
@@ -9,7 +9,7 @@
 // time between them. The 5-hour and weekly windows are the account's, so the
 // samples are shared by every session through the store.
 
-import type { CtxSample, History, Limit, Sample } from '../types'
+import type { History, Limit, Sample } from '../types'
 import { MINUTE } from './cache'
 
 const HOUR = 60 * MINUTE
@@ -67,19 +67,14 @@ export function readHistory(saved: unknown): History {
 
 // The step from the window's start to now: the value at the start (the newest
 // sample at or before it, else the oldest, when tracking began later) and the
-// newest value, with the time between the start used and now, and how many
-// samples came after the start's (by position: readings can share a moment).
-function stepOver<T extends { at: number }>(samples: T[], now: number, windowMs: number) {
+// newest value, with the time between the start used and now.
+function stepOver(samples: Sample[], now: number, windowMs: number) {
   const last = samples[samples.length - 1]
   if (last === undefined) return null
   const start = now - windowMs
-  let baseIndex = 0
-  samples.forEach((s, i) => {
-    if (s.at <= start) baseIndex = i
-  })
-  const base = samples[baseIndex]!
-  const from = Math.max(base.at, start)
-  return { base, last, span: now - from, after: samples.length - 1 - baseIndex }
+  const before = samples.filter(s => s.at <= start)
+  const base = before[before.length - 1] ?? samples[0]!
+  return { base, last, span: now - Math.max(base.at, start) }
 }
 
 // Percentage points an hour over the window, or null with less than
@@ -97,27 +92,6 @@ export function fullAt(percent: number, perHour: number | null, now: number, res
   const at = now + ((100 - percent) / perHour) * HOUR
   const reset = resetsAt ? Date.parse(resetsAt) : NaN
   return !Number.isNaN(reset) && at >= reset ? null : at
-}
-
-// The context's total added to this session's samples when it moved; a total
-// that fell (compaction, /clear) starts over.
-export function addContext(samples: CtxSample[], total: number, at: number): CtxSample[] {
-  const last = samples[samples.length - 1]
-  if (last !== undefined && last.total === total) return samples
-  if (last !== undefined && total < last.total) return [{ at, total }]
-  return trim([...samples, { at, total }], at)
-}
-
-// Readings until auto-compact at the mean growth per reading over the window
-// (a reading follows each turn), or null with fewer than two readings in it,
-// no growth, or no compaction point.
-export function turnsToCompact(samples: CtxSample[], now: number, windowMs: number, compactsAt: number | null): number | null {
-  const step = stepOver(samples, now, windowMs)
-  if (step === null || compactsAt === null || step.after < 2) return null
-  const growth = step.last.total - step.base.total
-  if (growth <= 0) return null
-  const left = compactsAt - step.last.total
-  return left > 0 ? Math.ceil(left / (growth / step.after)) : null
 }
 
 // A rate as the band prints it: "+12%/h", "+3.2%/h", "+0.20%/min".

@@ -59,14 +59,10 @@ export type Burn = { windowMin: number; unit: BurnUnit }
 export type Sample = { at: number; percent: number }
 export type History = Record<string, { resetsAt: string | null; samples: Sample[] }>
 
-// The context's total, kept when it moved.
-export type CtxSample = { at: number; total: number }
-
 // What the band shows of the pace: per window kind, its rate and when it
-// fills; the readings left until auto-compact; and the unit.
+// fills; and the unit.
 export type Pace = {
   windows: Record<string, { perHour: number; fullAt: number | null }>
-  ctxTurns: number | null
   unit: BurnUnit
 }
 
@@ -224,10 +220,9 @@ declare module 'claude-code' {
       globalCaps: CapSettings
       globalBurn: Burn
       sessionSettings: SessionSettings
-      // The usage windows' samples (shared through the store) and this
-      // session's context samples, for the burn rates.
+      // The usage windows' samples, shared through the store, for the burn
+      // rates.
       history: History
-      ctxHistory: CtxSample[]
       // Which of the two the settings panel edits.
       scope: Scope
     }

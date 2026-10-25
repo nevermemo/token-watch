@@ -44,24 +44,17 @@ const TURN_USAGE = { ...LAST_RESPONSE, model: 'claude-opus-5-5' }
 const MESSAGE: SessionMessage = { role: 'user', text: 'hi', toolUses: [] }
 
 // `apiUsage`: the last response's counts, which the band reads the prompt's
-// size from; null before one came back. `total`: the context's size, 212.2k
-// unless a test grows it (the messages row takes the difference).
-const usage = (rateLimits: SessionRateLimit[], apiUsage: ModelUsage | null = null, total = 212_200) => ({
+// size from; null before one came back.
+const usage = (rateLimits: SessionRateLimit[], apiUsage: ModelUsage | null = null) => ({
   startedAt: 0,
   rateLimits,
   context: {
-    tokens: total,
+    tokens: 212_200,
     window: 1_000_000,
     percent: 21,
     breakdown: {
-      categories: ROWS.map(([name, tokens, kind]) => ({
-        name,
-        tokens: name === 'Messages' ? tokens + total - 212_200 : tokens,
-        kind,
-        color: 'inactive',
-        isDeferred: false,
-      })),
-      totalTokens: total,
+      categories: ROWS.map(([name, tokens, kind]) => ({ name, tokens, kind, color: 'inactive', isDeferred: false })),
+      totalTokens: 212_200,
       maxTokens: 1_000_000,
       rawMaxTokens: 1_000_000,
       autocompactSource: 'auto' as const,
@@ -153,8 +146,6 @@ type Boot = {
   apiUsage?: ModelUsage
   // Why no surface places a pane; every pane is placed by default.
   paneUnplaced?: string
-  // The context's size, which a test may grow between readings.
-  context?: { total: number }
 }
 
 type Write = { path: string; text: string }
@@ -220,7 +211,7 @@ async function boot($: Engine, on: On, surface: 'terminal' | 'desktop' | null, r
     const { Box, Text } = $.ui.resolve(e)
     return options.beneath ? <Text>{options.beneath}</Text> : <Box />
   })
-  on('session.usage', () => ({ value: usage(rateLimits, options.apiUsage ?? null, options.context?.total) }))
+  on('session.usage', () => ({ value: usage(rateLimits, options.apiUsage ?? null) }))
   on('session.surfaces', () => ({ value: options.surfaces ?? (surface ? [surface] : []) }))
   on('session.id', () => ({ value: 'sess-1' }))
   on('session.cwd', () => ({ value: 'C:/proj' }))
@@ -1691,17 +1682,6 @@ describe('burn rate', () => {
     expect(saved.get('history')).toMatchObject({
       five_hour: { samples: [{ at: NOW - 20 * MINUTE, percent: 52.4 }, { at: NOW, percent: 62.4 }] },
     })
-  })
-
-  test('the context: readings left until auto-compact at its growth per reading', async ($, on) => {
-    const context = { total: 212_200 }
-    const { band } = await start($, on, 'terminal', RATE_LIMITS, undefined, undefined, { context })
-    context.total = 222_200
-    await $.session.measure(MEASURE)
-    context.total = 232_200
-    await $.session.measure(MEASURE)
-    // 10k a reading; 717.8k left before 950k: 72 readings.
-    expect(await band()).toContain('"~72 turns to compact"')
   })
 
   test('the snapshot carries each window\'s pace and when it fills', async ($, on) => {
