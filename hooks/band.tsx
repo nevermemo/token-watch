@@ -361,7 +361,7 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
           {chip('keep-warm', warmLabel, timerFill, 'keep-warm')}
           {showCaps && (
             <Box flexShrink={0} marginLeft={1}>
-              <Text dimColor>{capsLine(keepWarm, cache, now)}</Text>
+              <Text dimColor>{capsLine(keepWarm, props.cap, now)}</Text>
             </Box>
           )}
           {showCaps && chip('refresh-caps', 'Refresh Caps', CHIP_OFF, 'refresh-caps')}

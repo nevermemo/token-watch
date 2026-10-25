@@ -34,6 +34,16 @@ export type View = 'expanded' | 'bars' | 'plain'
 // and the prompt cache's TTL row.
 export type Part = '5H' | 'WK' | 'other' | 'CTX' | 'TTL'
 
+// Keep-warm's caps for one TTL as the settings panel sets them: the most
+// pings, and the most hours on.
+export type CapSetting = { pings: number; hours: number }
+
+// The caps by the TTL they apply to; saved across sessions.
+export type CapSettings = Record<Ttl, CapSetting>
+
+// The caps in force: the most pings, and the most time on in milliseconds.
+export type Cap = { pings: number; ms: number }
+
 // The prompt cache's time to live, as Claude Code requests it.
 export type Ttl = '5m' | '1h'
 
@@ -144,6 +154,8 @@ export type BandProps = {
   surface: 'terminal' | 'desktop' | 'mobile' | 'vscode'
   // The parts the settings panel hides.
   hidden: Part[]
+  // Keep-warm's caps in force for this session's TTL.
+  cap: Cap
 }
 
 declare module 'claude-code' {
@@ -163,6 +175,8 @@ declare module 'claude-code' {
       pingingSince: number | null
       // The parts of the band the settings panel hides; saved across sessions.
       hidden: Part[]
+      // Keep-warm's caps by TTL, as the settings panel sets them; saved.
+      caps: CapSettings
     }
   }
 }

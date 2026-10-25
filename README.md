@@ -2,7 +2,7 @@
 
 **Plan usage, context window and prompt cache countdown, right above the Claude Code prompt.**
 
-Token Watch is a Claude Code [mod](https://code.claude.com/docs/en/plugins/mods/overview) that draws a small band above the prompt. It shows your 5-hour and weekly usage with reset countdowns, your context window broken down by what fills it, and how long until the prompt cache expires, with an opt-in keep-warm. Right-click to cycle three views. Where the band can't be drawn, `/context-bar` answers as text, and [Token Watch for VS Code](https://github.com/nevermemo/token-watch-vscode) puts the same reading in the status bar.
+Token Watch is a Claude Code [mod](https://code.claude.com/docs/en/plugins/mods/overview) that draws a small band above the prompt. It shows your 5-hour and weekly usage with reset countdowns, your context window broken down by what fills it, and how long until the prompt cache expires, with an opt-in keep-warm. Right-click to cycle three views; a settings panel chooses what the band shows and sets keep-warm's caps. Where the band can't be drawn, `/context-bar` answers as text, and [Token Watch for VS Code](https://github.com/nevermemo/token-watch-vscode) puts the same reading in the status bar.
 
 **Quick start** (Claude Code 2.1.288 or later):
 
@@ -29,6 +29,8 @@ Expanded:
 │ TTL  52:50 / 60:00  [ Keep Warm ]                                 │
 ╰───────────────────────────────────────────────────────────────────╯
 ```
+
+The `[≡]` beside the band (☰ on the desktop) opens the [settings panel](#the-settings-panel).
 
 With keep-warm on, the button reads `Let Chill` and the TTL row adds its caps and a `Refresh Caps` button (in a band 90 columns or wider):
 
@@ -90,7 +92,7 @@ To list Token Watch in a marketplace you already run, add an entry to its `plugi
 }
 ```
 
-To pin a release, add `"ref": "v1.2.0"` to the `source` object. Administrators can also require the marketplace or the plugin on every machine through managed settings. See [Manage mods for your organization](https://code.claude.com/docs/en/plugins/mods/admin).
+To pin a release, add `"ref": "v1.3.0"` to the `source` object. Administrators can also require the marketplace or the plugin on every machine through managed settings. See [Manage mods for your organization](https://code.claude.com/docs/en/plugins/mods/admin).
 
 ### Uninstall
 
@@ -135,8 +137,37 @@ claude plugin uninstall token-watch@token-watch
 - **`/context-bar`** hides or shows the band. Where the band can't be drawn (the VS Code extension's chat panel, `claude -p`), it answers with the reading as one line instead: `5H 62% (2h 14m) · WK 31% (3d 4h) · CTX 21% (212k / 1M) · TTL 47:12 (1h · subscription)`. The TTL part reads `TTL lost` once the countdown runs out.
 - **`/context-bar text`** answers with that line anywhere.
 - **`/context-bar file`** says where the usage snapshot is and when it was last written.
-- **Saved choices:** the view and shown or hidden are kept across sessions; keep-warm is not.
+- **Click `[≡]`** beside the band (☰ on the desktop), or type **`/context-bar settings`**, to open the [settings panel](#the-settings-panel).
+- **Saved choices:** the view, shown or hidden, the parts shown and keep-warm's caps are kept across sessions; keep-warm itself is not.
 - **Narrow windows:** the collapsed line never wraps. As the window narrows, the small usage bars drop first, then the `212k / 1M` detail. The percentages and the timer always stay.
+
+## The settings panel
+
+A panel beside the transcript (docked in the terminal's fullscreen layout, inline on its main screen, beside the chat on the desktop). Open it with the `[≡]` button at the band's bottom right, shown in the expanded view, or with `/context-bar settings`. Every change applies at once and is saved.
+
+```text
+Show in the band
+
+[●] 5H:  5-hour window
+[●] WK:  Weekly window
+[●] OTH: Other windows (model allowances, spend limit)
+[○] CTX: Context window
+[●] TTL: Prompt cache countdown and keep-warm
+
+Keep-warm caps (1h TTL)
+
+Pings: [-]   8 [+]
+Hours: [-]   8 [+]
+       [Reset]
+```
+
+- **Show in the band:** each toggle shows or hides a part in every view. Hiding CTX takes its legend too. Hiding TTL takes the timer and keep-warm's buttons, and **turns keep-warm off**, so nothing spends out of sight. With every part hidden, the band keeps the `[≡]` button, so you can always get back.
+- **Keep-warm caps:** the caps for this session's TTL, one step at a time within bounds. A running keep-warm keeps to new caps from its next ping. `Reset` restores the defaults.
+
+  | TTL | Default | Pings | Hours |
+  |-----|---------|-------|-------|
+  | One hour | 8 pings or 8 hours | 1 to 24 | 1 to 24 |
+  | Five minutes | 30 pings or 2 hours | 5 to 100, in steps of 5 | 1 to 6 |
 
 ## The prompt cache and keep-warm
 
@@ -165,7 +196,7 @@ Every ping is a real request, counted against your plan usage like any other. Pe
 The multipliers are the API's published ones ([prompt caching pricing](https://platform.claude.com/docs/en/build-with-claude/prompt-caching#pricing)). The row shows each ping's actual counts for a minute (`ping read 33k · wrote 14k`, 90 columns or wider), and `/context-bar text` keeps the last ping's.
 
 **When it stops:**
-- at the caps: 8 pings or 8 hours on the hour, 30 pings or 2 hours on five minutes;
+- at the caps: by default 8 pings or 8 hours on the hour, 30 pings or 2 hours on five minutes, or what the [settings panel](#the-settings-panel) sets;
 - when you send a prompt (a background notification, schedule or peer message does not count);
 - after two failed pings in a row;
 - when a ping finds the cache already cold, so the next would only pay to re-cache;
@@ -233,7 +264,7 @@ Token Watch reads numbers Claude Code already has. It opens **no network connect
 
 You can check this yourself before installing: `claude plugin validate ./token-watch` lists every hook a mod registers and every API it calls. For Token Watch:
 
-- **Hooks:** `session.start`, `session.measure`, `turn.start` and `turn.complete` (when a main-thread turn begins and ends; the text is not read), `prompt.submit` (only the prompt's origin, to stop keep-warm when you type; the prompt passes through untouched), `session.compact` and `session.end` (compaction and the session ending stop keep-warm), `command.run` (for `/context-bar`), `ui.message` (the clicks), and `ui.render` (the band).
+- **Hooks:** `session.start`, `session.measure`, `turn.start` and `turn.complete` (when a main-thread turn begins and ends; the text is not read), `prompt.submit` (only the prompt's origin, to stop keep-warm when you type; the prompt passes through untouched), `session.compact` and `session.end` (compaction and the session ending stop keep-warm), `command.run` (for `/context-bar`), `ui.message` (the band's clicks), and `ui.render` (the band and the settings panel).
 - **Calls:**
   - `$.session.usage`: the context breakdown and usage windows. Claude Code estimates these locally, without extra API requests.
   - `$.session.surfaces`, `$.session.id`, `$.session.cwd`: where the session draws (so `/context-bar` knows whether to toggle the band or answer as text), and the session's id and directory for the snapshot.
@@ -241,14 +272,17 @@ You can check this yourself before installing: `claude plugin validate ./token-w
   - `$.model.fork`: the keep-warm ping, one small request over your conversation, sent only while keep-warm is on.
   - `$.settings.read`: the `promptCacheTtl` setting alone, read once at start; no other setting is read.
   - `$.command.register`: adds `/context-bar`.
+  - `$.ui.open`: opens the settings panel, when you click `[≡]` or type `/context-bar settings`.
   - `$.store`: remembers your choices and the last usage seen. `$.store.delete` removes the 1.1 keys once migrated.
   - `$.state` and `$.ui.resolve`: share data between the mod's hooks and draw the band.
   - `$.env.get` (`USERPROFILE`, `HOME`, `FORCE_PROMPT_CACHING_5M`, `CLAUDE_CODE_PROMPT_CACHE_TTL`, `ENABLE_PROMPT_CACHING_1H`): your home directory and the prompt cache's TTL controls. Nothing else is read from the environment.
   - `$.fs.write` and `$.fs.stat`: write the snapshot and check its timestamp. No other file is written, and no file is read.
 
-**What it saves:** `$.store` keeps three things in Claude Code's own plugin storage on your machine:
+**What it saves:** `$.store` keeps five things in Claude Code's own plugin storage on your machine:
 - the view (expanded, bars, plain),
 - whether it's hidden,
+- the parts the settings panel hides,
+- keep-warm's caps, by TTL,
 - the last usage windows seen (percentages and reset times).
 
 Keep-warm is never saved. The snapshot file is described [above](#the-usage-snapshot).
@@ -270,8 +304,9 @@ Keep-warm is never saved. The snapshot file is described [above](#the-usage-snap
 | `turn.start`, `turn.complete` | Marks a main-thread turn running, so no ping is sent; a response restarts the TTL countdown and arms the next ping. A subagent's turns are not followed. |
 | `prompt.submit` | A prompt from you turns keep-warm off; background deliveries do not; the text passes through unread. |
 | `session.compact`, `session.end` | Compaction stops keep-warm and restarts the countdown (a precompute changes nothing). The session ending stops keep-warm; after `/clear`, a resume or a logout the cache is forgotten. |
-| `command.run` (`context-bar`) | Shows or hides the band where it draws; answers with the reading as text where nothing draws, with `text`, or with the snapshot's path with `file`. |
-| `ui.render` (`AbovePrompt`) | Draws the band as a client module ([`hooks/band.tsx`](hooks/band.tsx)). The band lays itself out to the available width and reports clicks. Other mods drawing above the prompt keep their place; Token Watch adds its band beneath theirs. |
+| `command.run` (`context-bar`) | Shows or hides the band where it draws; answers with the reading as text where nothing draws, with `text`, or with the snapshot's path with `file`; opens the settings panel with `settings`. |
+| `ui.render` (`AbovePrompt`) | Draws the band as a client module ([`hooks/band.tsx`](hooks/band.tsx)). The band lays itself out to the available width and reports clicks. Other mods drawing above the prompt keep their place; Token Watch adds its band beneath theirs. Beside it, the `[≡]` button: a press on a button inside the band's own drawing does not count as yours, and a pane you didn't ask for opens only on a terminal 144 columns wide. |
+| `ui.render` (`Pane`) | Draws the settings panel: the parts' toggles and keep-warm's caps. |
 | `ui.message` | Receives the clicks: a right click moves to the next view, the timer or the keep-warm button toggles keep-warm, `Refresh Caps` starts its caps over. |
 
 **Bars on each surface:** on the desktop app, bars are boxes 60% of the line's height. In a terminal they are `▄` blocks. Both are thinner than the line, so stacked bars keep a gap between them.
@@ -322,6 +357,7 @@ npx -p typescript tsc -p .
 - the text reply where nothing draws (the VS Code chat panel, headless),
 - the usage snapshot: its content, the heartbeat, several sessions, the off switch,
 - the TTL row: its countdown, the buttons' chips, labels and colours, the terminal's fixed-width label, a band drawn again, Refresh Caps,
+- the settings panel: its button and command, each part hidden in every view and saved, hiding TTL turning keep-warm off, every part hidden, the caps' steppers, bounds, reset and restore, and keep-warm stopping at the caps it set,
 - keep-warm, with a mocked clock and a stubbed fork: its schedule, its caps, every stop condition, a ping held open (no second ping while one is out), a ping that never answers, failures counted while a retry is out, subagent turns, precompute, every way a session ends, an empty reply, the TTL's precedence, and the snapshot's cache object.
 
 **Seeing your edits:**

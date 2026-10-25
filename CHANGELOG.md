@@ -2,6 +2,22 @@
 
 All notable changes to Token Watch are listed here. The project follows [Semantic Versioning](https://semver.org/).
 
+## 1.3.0 (2026-10-25)
+
+A settings panel: choose what the band shows, and set keep-warm's caps.
+
+### Added
+
+- **Settings panel:** opened by a `[≡]` button at the band's bottom right (☰ on the desktop, in the expanded view) or `/context-bar settings`. It docks beside the transcript where the terminal docks panes, opens inline on its main screen, and sits beside the chat on the desktop.
+- **Show in the band:** toggles for 5H, WK, other windows (OTH), CTX and TTL, applied to every view and saved. Hiding CTX takes its legend; hiding TTL takes the timer and keep-warm's buttons and turns keep-warm off. With every part hidden, the `[≡]` button stays.
+- **Keep-warm caps:** minus and plus steppers for this session's TTL, within bounds (1 to 24 pings and hours on the hour; 5 to 100 pings in steps of 5 and 1 to 6 hours on five minutes), and `Reset` to the defaults. Saved, and a running keep-warm keeps to new caps from its next ping. The band, `/context-bar text` and the snapshot's `maxPings` and `maxMs` follow them.
+
+### Changed
+
+- `/context-bar` takes `settings`.
+- The snapshot's keep-warm caps follow the settings panel.
+- `tsconfig.json` also reports unused locals.
+
 ## 1.2.0 (2026-10-25)
 
 The prompt cache gets a row: how long until the API forgets this conversation, and an opt-in keep-warm that refreshes it while you are away.

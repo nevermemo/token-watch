@@ -32,8 +32,9 @@
 //   to the next view, { action: 'keep-warm' } (the timer or the keep-warm
 //   button) toggles keep-warm, { action: 'refresh-caps' } starts its caps over,
 //   and the ☰ button beside the band opens the settings panel.
-// ui.render (Pane, the settings panel): which parts of the band show. Hiding
-//   the TTL row turns keep-warm off, so nothing spends out of sight.
+// ui.render (Pane, the settings panel): which parts of the band show, and
+//   keep-warm's caps for this session's TTL. Hiding the TTL row turns
+//   keep-warm off, so nothing spends out of sight.
 //
 // A reading is $.session.usage({ breakdown: 'summary' }): the /context rows,
 // estimated locally, so it costs no token-count request, and the plan's
@@ -52,10 +53,12 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, ModelForkResult, Register, Timer } from 'claude-code'
 
-import type { BandProps, Limit, Part, Reading, Slice, Snapshot, TtlInputs, View } from '../types'
+import type { BandProps, CapSetting, Limit, Part, Reading, Slice, Snapshot, TtlInputs, View } from '../types'
 import {
   BACKGROUND_ORIGINS,
+  CAP_LIMITS,
   COLD_READ_SHARE,
+  DEFAULT_CAPS,
   KEEP_WARM_OFF,
   MAX_FAILURES,
   MIN_WARM_READ,
@@ -69,8 +72,10 @@ import {
   isTtl,
   leadMs,
   nextView,
+  readCaps,
   refreshMs,
   resolveTtl,
+  stepCap,
 } from './cache'
 import { PARTS, hmmss, isPart, label, partOf, readingLine, short, sorted } from './format'
 
@@ -85,6 +90,7 @@ const cache = atom({ plugin: 'token-watch', key: 'cache' } as const, NO_CACHE)
 const keepWarm = atom({ plugin: 'token-watch', key: 'keepWarm' } as const, KEEP_WARM_OFF)
 const pingingSince = atom({ plugin: 'token-watch', key: 'pingingSince' } as const, null)
 const hidden = atom({ plugin: 'token-watch', key: 'hidden' } as const, [])
+const capSettings = atom({ plugin: 'token-watch', key: 'caps' } as const, DEFAULT_CAPS)
 
 // The settings panel's pane id, and its width when docked beside the transcript.
 const SETTINGS = 'token-watch-settings'
@@ -156,6 +162,8 @@ export const register: Register = (on, options) => {
     const savedHidden = await $.store.get('hidden')
     const parts: Part[] = Array.isArray(savedHidden) ? savedHidden.filter(isPart) : []
     await update($, hidden, () => parts)
+    const savedCaps = readCaps(await $.store.get('caps'))
+    await update($, capSettings, () => savedCaps)
     await tick($)
     // A new session has no usage windows until its first response, so start
     // from the last ones seen; any whose reset time has passed is drawn at 0%,
@@ -284,6 +292,7 @@ export const register: Register = (on, options) => {
         cache: await read($, cache),
         keepWarm: await read($, keepWarm),
         isWorking: await read($, working),
+        cap: await currentCap($),
       })
       return { text: text || 'Token Watch: no reading yet.' }
     }
@@ -334,6 +343,10 @@ export const register: Register = (on, options) => {
     // The name column: the longest name and its colon, and on the desktop a
     // cell of slack for its proportional font.
     const nameWidth = Math.max(...PARTS.map(([, name]) => name.length)) + (isTerminal ? 1 : 2)
+    // The caps section: this session's TTL, the caps, and their label column.
+    const ttl = (await read($, cache)).ttl
+    const settings = await read($, capSettings)
+    const capWidth = 'Hours:'.length + (isTerminal ? 0 : 1)
     return (
       <Box flexDirection="column" rowGap={1} paddingX={1}>
         <Text bold>Show in the band</Text>
@@ -355,7 +368,49 @@ export const register: Register = (on, options) => {
           ))}
         </Box>
         <Text dimColor wrap="wrap">
-          Hiding TTL turns keep-warm off. /context-bar settings opens this panel again.
+          Hiding TTL turns keep-warm off.
+        </Text>
+        <Text bold>{`Keep-warm caps (${ttl} TTL)`}</Text>
+        <Box flexDirection="column">
+          {(['pings', 'hours'] as const).map(which => {
+            const value = settings[ttl][which]
+            const { min, max } = CAP_LIMITS[ttl][which]
+            return (
+              <Box key={which} flexDirection="row" columnGap={1}>
+                <Box width={capWidth} flexShrink={0}>
+                  <Text>{which === 'pings' ? 'Pings:' : 'Hours:'}</Text>
+                </Box>
+                <Button
+                  key={`${which}-down`}
+                  plain={isTerminal || undefined}
+                  dimColor={value <= min}
+                  onPress={() => stepCaps($, which, -1)}
+                >
+                  {isTerminal ? '[-]' : '\u2212'}
+                </Button>
+                <Box width={3} flexShrink={0} justifyContent="flex-end">
+                  <Text>{String(value)}</Text>
+                </Box>
+                <Button
+                  key={`${which}-up`}
+                  plain={isTerminal || undefined}
+                  dimColor={value >= max}
+                  onPress={() => stepCaps($, which, 1)}
+                >
+                  {isTerminal ? '[+]' : '+'}
+                </Button>
+              </Box>
+            )
+          })}
+          <Box flexDirection="row" columnGap={1}>
+            <Box width={capWidth} flexShrink={0} />
+            <Button key="caps-reset" plain={isTerminal || undefined} onPress={() => resetCaps($)}>
+              {isTerminal ? '[Reset]' : 'Reset'}
+            </Button>
+          </Box>
+        </Box>
+        <Text dimColor wrap="wrap">
+          {`Defaults: ${DEFAULT_CAPS[ttl].pings} pings or ${DEFAULT_CAPS[ttl].hours} hours. A running keep-warm keeps to new caps from its next ping. /context-bar settings opens this panel again.`}
         </Text>
       </Box>
     )
@@ -387,6 +442,7 @@ export const register: Register = (on, options) => {
       keepWarm: await read($, keepWarm),
       surface: e.surface,
       hidden: await read($, hidden),
+      cap: await currentCap($),
     }
 
     // The settings button sits outside the band, at its bottom right: a press
@@ -546,6 +602,27 @@ async function openSettings($: EngineInterface) {
   return $.ui.open({ id: SETTINGS, title: 'Token Watch', columns: SETTINGS_COLUMNS })
 }
 
+// Keep-warm's caps in force: the settings panel's, for this session's TTL.
+async function currentCap($: EngineInterface) {
+  return caps((await read($, cache)).ttl, await read($, capSettings))
+}
+
+// One of this session's TTL's caps moved a step, or all of them back to the
+// defaults, and saved. A running keep-warm is held to them from its next ping.
+async function stepCaps($: EngineInterface, which: keyof CapSetting, by: 1 | -1) {
+  const ttl = (await read($, cache)).ttl
+  const next = stepCap(await read($, capSettings), ttl, which, by)
+  await update($, capSettings, () => next)
+  await $.store.set('caps', next)
+  await writeSnapshot($)
+}
+
+async function resetCaps($: EngineInterface) {
+  await update($, capSettings, () => DEFAULT_CAPS)
+  await $.store.set('caps', DEFAULT_CAPS)
+  await writeSnapshot($)
+}
+
 // A part of the band shown or hidden, and saved. Hiding the TTL row turns
 // keep-warm off: its controls go with the row, and nothing should spend out
 // of sight.
@@ -662,7 +739,7 @@ async function ping($: EngineInterface) {
     await tick($)
     const sentAt = await read($, nowMs)
     if (sentAt >= c.warmUntil) return await stopKeepWarm($, 'stopped: cache went cold')
-    const cap = caps(refreshMs(c.ttl))
+    const cap = caps(c.ttl, await read($, capSettings))
     if (k.pings >= cap.pings) return await stopKeepWarm($, `stopped: ${cap.pings} pings`)
     if (k.startedAt !== null && sentAt - k.startedAt >= cap.ms) {
       return await stopKeepWarm($, `stopped: ${hmmss(cap.ms)} reached`)
@@ -775,7 +852,7 @@ async function writeSnapshot($: EngineInterface, force = false) {
     const latest = await read($, reading)
     const c = await read($, cache)
     const k = await read($, keepWarm)
-    const cap = caps(refreshMs(c.ttl))
+    const cap = caps(c.ttl, await read($, capSettings))
     const iso = (ms: number) => new Date(ms).toISOString()
     const snapshot: Snapshot = {
       schema: 1,

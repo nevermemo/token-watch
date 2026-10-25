@@ -6,7 +6,7 @@
 
 import type { PromptOrigin } from 'claude-code'
 
-import type { CacheState, KeepWarm, Limit, Ttl, TtlInputs, TtlSource, View } from '../types'
+import type { Cap, CacheState, CapSetting, CapSettings, KeepWarm, Limit, Ttl, TtlInputs, TtlSource, View } from '../types'
 
 export const MINUTE = 60_000
 
@@ -35,10 +35,44 @@ export function leadMs(windowMs: number) {
   return windowMs >= TTL_MS['1h'] ? 8 * MINUTE : 75_000
 }
 
-// The caps, by the window each ping buys: on five-minute refreshes 30 pings
-// or two hours, on hour-long refreshes 8 pings or eight hours.
-export function caps(windowMs: number) {
-  return windowMs >= TTL_MS['1h'] ? { pings: 8, ms: 8 * 60 * MINUTE } : { pings: 30, ms: 2 * 60 * MINUTE }
+// Keep-warm's caps by TTL, until the settings panel changes them: on the
+// hour 8 pings or eight hours, on five minutes 30 pings or two hours.
+export const DEFAULT_CAPS: CapSettings = { '1h': { pings: 8, hours: 8 }, '5m': { pings: 30, hours: 2 } }
+
+// What the settings panel's steppers allow, by TTL: the least, the most and
+// the step. On the hour a ping goes out about every 52 minutes, so 24 pings
+// is about a day; on five minutes every 3:45, so 100 pings is about six hours.
+export const CAP_LIMITS: Record<Ttl, Record<keyof CapSetting, { min: number; max: number; step: number }>> = {
+  '1h': { pings: { min: 1, max: 24, step: 1 }, hours: { min: 1, max: 24, step: 1 } },
+  '5m': { pings: { min: 5, max: 100, step: 5 }, hours: { min: 1, max: 6, step: 1 } },
+}
+
+// The caps in force for a TTL.
+export function caps(ttl: Ttl, settings: CapSettings): Cap {
+  const cap = settings[ttl]
+  return { pings: cap.pings, ms: cap.hours * 60 * MINUTE }
+}
+
+// One cap moved a step up (+1) or down (-1), held within its bounds.
+export function stepCap(settings: CapSettings, ttl: Ttl, which: keyof CapSetting, by: 1 | -1): CapSettings {
+  const { min, max, step } = CAP_LIMITS[ttl][which]
+  const value = Math.min(max, Math.max(min, settings[ttl][which] + by * step))
+  return { ...settings, [ttl]: { ...settings[ttl], [which]: value } }
+}
+
+// Caps read back from the store: each value a whole number on its stepper's
+// grid within its bounds, else the default. Anything else is the defaults.
+export function readCaps(saved: unknown): CapSettings {
+  const read = (ttl: Ttl, which: keyof CapSetting) => {
+    const { min, max, step } = CAP_LIMITS[ttl][which]
+    const value = (saved as Partial<Record<Ttl, Partial<CapSetting>>> | null)?.[ttl]?.[which]
+    const ok = typeof value === 'number' && Number.isInteger(value) && value >= min && value <= max && (value - min) % step === 0
+    return ok ? value : DEFAULT_CAPS[ttl][which]
+  }
+  return {
+    '1h': { pings: read('1h', 'pings'), hours: read('1h', 'hours') },
+    '5m': { pings: read('5m', 'pings'), hours: read('5m', 'hours') },
+  }
 }
 
 // The one user message a ping appends; the reply is a few tokens.

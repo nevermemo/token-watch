@@ -1,4 +1,4 @@
-import type { ModelForkResult, ModelUsage, On, RenderSurface, SessionRateLimit, SessionMeasureInput, SessionMessage } from 'claude-code'
+import type { ModelForkResult, ModelUsage, On, PaneOpenArgs, RenderSurface, SessionRateLimit, SessionMeasureInput, SessionMessage } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
@@ -83,11 +83,6 @@ const count = (s: string, part: string) => s.split(part).length - 1
 // A right click moves to the next view; a left click does nothing.
 const rightClick = { type: 'up', x: 5, y: 0, button: 'right' } as const
 const leftClick = { type: 'up', x: 5, y: 0, button: 'left' } as const
-
-// How a surface paints a coloured piece: a Box background on the desktop, a
-// run of glyphs in a terminal.
-const paint = (surface: 'terminal' | 'desktop', color: string) =>
-  surface === 'desktop' ? `"backgroundColor":"${color}"` : `"color":"${color}","wrap":"wrap"`
 
 // The button chips, which are the indicators: grey with keep-warm off, green
 // with it on, red with no warm cache (before the first response, or once the
@@ -180,6 +175,7 @@ const snapshotOf = (writes: Write[], i?: number) => JSON.parse(written(writes, i
 async function boot($: Engine, on: On, surface: 'terminal' | 'desktop' | null, rateLimits: SessionRateLimit[], options: Boot = {}) {
   const writes: Write[] = []
   const forks: string[] = []
+  const opens: PaneOpenArgs[] = []
   const saved = new Map<string, unknown>(Object.entries(options.stored ?? {}))
   const clock = mock.clock(on, { now: NOW })
   mock.env(on, options.env ?? { USERPROFILE: 'C:/Users/test' })
@@ -220,24 +216,31 @@ async function boot($: Engine, on: On, surface: 'terminal' | 'desktop' | null, r
       ? { deny: 'ENOENT' }
       : { value: { kind: 'file', size: 1, mtimeMs: options.statMtimeMs, isLink: false } }),
   )
+  on('ui.open', ($, e) => {
+    opens.push({ ...e })
+    return { value: { isPlaced: true } }
+  })
   on('fs.write', ($, e) => {
     writes.push({ path: e.path, text: e.text })
     return { value: undefined }
   })
   await $.session.start({ cwd: '.', surface, isInteractive: true })
 
-  return { writes, saved, clock, forks }
+  return { writes, saved, clock, forks, opens }
 }
 
 // `beneath`: text a mod beneath this one draws in the band, if any.
 // `stored`: what the mod's store holds from earlier sessions.
 async function start($: Engine, on: On, surface: Surface, rateLimits: SessionRateLimit[], beneath?: string, stored?: Record<string, unknown>, options: Boot = {}) {
-  const { writes, saved, clock, forks } = await boot($, on, surface, rateLimits, { ...options, beneath, stored })
+  const { writes, saved, clock, forks, opens } = await boot($, on, surface, rateLimits, { ...options, beneath, stored })
   const ui = await $.ui.mount<Surface, 'AbovePrompt'>({ ...BAND, surface })
   await ui.resize({ columns: 116, rows: 8, in: 'band' })
   const band = async () => JSON.stringify(await ui.drawn({ in: 'band' }))
 
-  return { ui, band, writes, saved, clock, forks }
+  // The whole drawing, the settings button beside the band included.
+  const tree = async () => JSON.stringify(await ui.drawn())
+
+  return { ui, band, tree, writes, saved, clock, forks, opens }
 }
 
 // One main-thread turn, started and ended at the clock's time now.
@@ -1260,6 +1263,151 @@ describe('keep-warm safety', () => {
     expect(forks.length).toBe(0)
     expect(await band()).toContain('stopped: 8:00:00 reached')
     expect(await band()).toContain(keepWarmOff('terminal'))
+  })
+})
+
+// The settings panel as the engine raises it once open: docked, 44 columns.
+const PANE = {
+  plugin: 'token-watch',
+  component: 'Pane',
+  requestId: 'token-watch-settings',
+  props: { title: 'Token Watch', isFocused: false, bodyColumns: 44, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
+} as const
+
+async function mountPanel($: Engine, surface: Surface) {
+  const pane = await $.ui.mount<Surface, 'Pane'>({ ...PANE, surface })
+  const drawn = async () => JSON.stringify(await pane.drawn())
+  return { pane, drawn }
+}
+
+// A part's toggle as the panel draws it: the mark alone in the Button.
+const toggle = (surface: Surface, part: string, isShown: boolean) =>
+  `"key":"part-${part}","label":"${surface === 'terminal' ? (isShown ? '[\u25cf]' : '[\u25cb]') : isShown ? '\u2611' : '\u2610'}"`
+
+describe('settings panel', () => {
+  for (const surface of ['terminal', 'desktop'] as const) {
+    test(`${surface}: a settings button beside the expanded band opens the panel; the collapsed views have none`, async ($, on) => {
+      const { ui, band, tree, opens } = await start($, on, surface, RATE_LIMITS)
+      // Outside the band's own drawing, so a press on it is the person's.
+      expect(await tree()).toContain(`"key":"settings","label":"${surface === 'terminal' ? '[\u2261]' : '\u2630'}"`)
+      expect(await band()).not.toContain('"key":"settings"')
+      await ui.press({ key: 'settings' })
+      expect(opens).toEqual([{ id: 'token-watch-settings', title: 'Token Watch', columns: 44 }])
+      await ui.pointer(rightClick)
+      expect(await tree()).not.toContain('"key":"settings"')
+    })
+
+    test(`${surface}: the panel's toggles hide parts of the band in every view, and are saved`, async ($, on) => {
+      const { ui, band, saved } = await start($, on, surface, RATE_LIMITS)
+      const { pane, drawn } = await mountPanel($, surface)
+      for (const part of ['5H', 'WK', 'other', 'CTX', 'TTL']) expect(await drawn()).toContain(toggle(surface, part, true))
+      expect(await drawn()).toContain('OTH:')
+
+      await pane.press({ key: 'part-5H' })
+      expect(saved.get('hidden')).toEqual(['5H'])
+      expect(await drawn()).toContain(toggle(surface, '5H', false))
+      let expanded = await band()
+      expect(expanded).not.toContain('"5H"')
+      expect(expanded).toContain('"WK"')
+
+      // Hiding the context takes its legend with it.
+      await pane.press({ key: 'part-CTX' })
+      expanded = await band()
+      expect(expanded).not.toContain('"CTX"')
+      expect(expanded).not.toContain('messages 186k')
+      expect(expanded).toContain('"TTL"')
+
+      await ui.pointer(rightClick)
+      const collapsed = await band()
+      expect(collapsed).not.toContain('"5H"')
+      expect(collapsed).not.toContain('"CTX"')
+      expect(collapsed).toContain('"WK"')
+      expect(collapsed).toContain('cache-timer')
+
+      await pane.press({ key: 'part-5H' })
+      expect(saved.get('hidden')).toEqual(['CTX'])
+      expect(await band()).toContain('"5H"')
+    })
+  }
+
+  test('hiding TTL turns keep-warm off and takes its controls; a press from before does nothing', async ($, on) => {
+    const { ui, band, clock, forks, writes } = await start($, on, 'terminal', RATE_LIMITS, undefined, undefined, FIVE_M)
+    await turn($)
+    await ui.press({ key: 'keep-warm' })
+    const { pane } = await mountPanel($, 'terminal')
+    await pane.press({ key: 'part-TTL' })
+    expect(await band()).not.toContain('"TTL"')
+    expect(snapshotOf(writes).cache.keepWarm.on).toBe(false)
+    await ui.post({ action: 'keep-warm' })
+    expect(snapshotOf(writes).cache.keepWarm.on).toBe(false)
+    await ui.pointer(rightClick)
+    expect(await band()).not.toContain('cache-timer')
+    await clock.advance(10 * MINUTE)
+    expect(forks.length).toBe(0)
+  })
+
+  test('with every part hidden, a collapsed view keeps the settings button, the way back', async ($, on) => {
+    const { tree, band } = await start($, on, 'terminal', RATE_LIMITS, undefined, {
+      view: 'bars',
+      hidden: ['5H', 'WK', 'other', 'CTX', 'TTL'],
+    })
+    expect(await band()).not.toContain('"WK"')
+    expect(await tree()).toContain('"key":"settings"')
+  })
+
+  test('saved parts are restored, and anything unknown is dropped', async ($, on) => {
+    const { band, saved } = await start($, on, 'terminal', RATE_LIMITS, undefined, { hidden: ['WK', 'nonsense', 3] })
+    expect(await band()).not.toContain('"WK"')
+    const { pane } = await mountPanel($, 'terminal')
+    await pane.press({ key: 'part-WK' })
+    expect(saved.get('hidden')).toEqual([])
+    expect(await band()).toContain('"WK"')
+  })
+
+  test('/context-bar settings opens the panel', async ($, on) => {
+    const { opens } = await start($, on, 'terminal', RATE_LIMITS)
+    expect((await run($, 'settings')).text).toBe('Token Watch settings opened.')
+    expect(opens).toEqual([{ id: 'token-watch-settings', title: 'Token Watch', columns: 44 }])
+  })
+
+  test("the caps steppers move this TTL's caps a step at a time, within bounds; saved, and Reset restores them", async ($, on) => {
+    const { ui, band, saved, writes } = await start($, on, 'terminal', RATE_LIMITS, undefined, undefined, FIVE_M)
+    await turn($)
+    const { pane, drawn } = await mountPanel($, 'terminal')
+    expect(await drawn()).toContain('Keep-warm caps (5m TTL)')
+    await pane.press({ key: 'pings-up' })
+    for (let i = 0; i < 5; i++) await pane.press({ key: 'hours-up' })
+    // Six hours is the most on five minutes: one more press changes nothing.
+    expect(saved.get('caps')).toEqual({ '1h': { pings: 8, hours: 8 }, '5m': { pings: 35, hours: 6 } })
+    await pane.press({ key: 'hours-up' })
+    expect(saved.get('caps')).toEqual({ '1h': { pings: 8, hours: 8 }, '5m': { pings: 35, hours: 6 } })
+    expect(snapshotOf(writes).cache.keepWarm).toMatchObject({ maxPings: 35, maxMs: 6 * 60 * MINUTE })
+    await ui.press({ key: 'keep-warm' })
+    expect(await band()).toContain('Pings: 0/35  Time: 00:00 / 6:00:00')
+    await pane.press({ key: 'caps-reset' })
+    expect(saved.get('caps')).toEqual({ '1h': { pings: 8, hours: 8 }, '5m': { pings: 30, hours: 2 } })
+    expect(await band()).toContain('Pings: 0/30  Time: 00:00 / 2:00:00')
+  })
+
+  test('keep-warm stops at the caps the panel set', { timeoutMs: 30_000 }, async ($, on) => {
+    const { ui, band, clock, forks } = await start($, on, 'terminal', RATE_LIMITS, undefined, undefined, FIVE_M)
+    await turn($)
+    const { pane } = await mountPanel($, 'terminal')
+    // Five pings is the least on five minutes: further presses stay there.
+    for (let i = 0; i < 6; i++) await pane.press({ key: 'pings-down' })
+    await ui.press({ key: 'keep-warm' })
+    for (let i = 0; i < 6; i++) await clock.advance(PING_AT)
+    expect(forks.length).toBe(5)
+    expect(await band()).toContain('stopped: 5 pings')
+  })
+
+  test('saved caps are restored; a value off its stepper or out of bounds falls back to the default', async ($, on) => {
+    const { writes } = await start($, on, 'terminal', RATE_LIMITS, undefined, {
+      caps: { '5m': { pings: 33, hours: 4 }, '1h': { pings: 99, hours: 'x' } },
+    }, FIVE_M)
+    await turn($)
+    // 33 pings is off the five-minute stepper's grid of 5: the default 30 stands.
+    expect(snapshotOf(writes).cache.keepWarm).toMatchObject({ maxPings: 30, maxMs: 4 * 60 * MINUTE })
   })
 })
 

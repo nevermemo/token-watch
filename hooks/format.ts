@@ -2,8 +2,8 @@
 // spells its figures, so the band, the /context-bar reading and the usage
 // snapshot all say the same thing.
 
-import type { CacheState, KeepWarm, Limit, Part, Reading } from '../types'
-import { TTL_MS, caps, refreshMs } from './cache'
+import type { Cap, CacheState, KeepWarm, Limit, Part, Reading } from '../types'
+import { TTL_MS } from './cache'
 
 // Usage windows by kind, in the order they are shown; any other window the
 // API sends comes after them.
@@ -134,22 +134,20 @@ export function timerText(cache: CacheState, nowMs: number, isWorking: boolean) 
 }
 
 // Keep-warm's caps on the expanded TTL row: "Pings: 0/8  Time: 00:26 / 8:00:00".
-export function capsLine(keepWarm: KeepWarm, cache: CacheState, nowMs: number) {
-  const cap = caps(refreshMs(cache.ttl))
+export function capsLine(keepWarm: KeepWarm, cap: Cap, nowMs: number) {
   const elapsed = keepWarm.startedAt === null ? 0 : nowMs - keepWarm.startedAt
   return `Pings: ${keepWarm.pings}/${cap.pings}  Time: ${clockText(elapsed)} / ${hmmss(cap.ms)}`
 }
 
 // Keep-warm's caps for the text reply, spelled as the band spells them:
 // "pings 3/30 · 42:05 / 2:00:00".
-export function capsText(keepWarm: KeepWarm, cache: CacheState, nowMs: number) {
-  const cap = caps(refreshMs(cache.ttl))
+export function capsText(keepWarm: KeepWarm, cap: Cap, nowMs: number) {
   const elapsed = keepWarm.startedAt === null ? 0 : nowMs - keepWarm.startedAt
   return `pings ${keepWarm.pings}/${cap.pings} · ${clockText(elapsed)} / ${hmmss(cap.ms)}`
 }
 
 // What the text reply knows of the cache beside the reading.
-export type CacheLine = { cache: CacheState; keepWarm: KeepWarm; isWorking: boolean }
+export type CacheLine = { cache: CacheState; keepWarm: KeepWarm; isWorking: boolean; cap: Cap }
 
 // The reading as one line of text, for where the band cannot be drawn:
 // "5H 62% (2h 14m) · WK 31% (3d 4h) · CTX 21% (212k / 1M)", then once there
@@ -165,9 +163,9 @@ export function readingLine(reading: Reading | null, limits: Limit[], nowMs: num
     parts.push(`CTX ${percent}% (${short(reading.total)} / ${short(reading.window)})`)
   }
   if (cacheLine && (cacheLine.cache.warmUntil !== null || cacheLine.keepWarm.on)) {
-    const { cache, keepWarm, isWorking } = cacheLine
+    const { cache, keepWarm, isWorking, cap } = cacheLine
     const extras = [ttlText(cache)]
-    if (keepWarm.on) extras.push(`keep-warm ${capsText(keepWarm, cache, nowMs)}`)
+    if (keepWarm.on) extras.push(`keep-warm ${capsText(keepWarm, cap, nowMs)}`)
     if (keepWarm.lastPing !== null) {
       extras.push(`last ping read ${short(keepWarm.lastPing.read)} wrote ${short(keepWarm.lastPing.wrote)}`)
     }
