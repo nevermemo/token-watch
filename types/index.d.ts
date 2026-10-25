@@ -39,6 +39,9 @@ export type View = 'expanded' | 'bars' | 'plain'
 // and the prompt cache's TTL row.
 export type Part = '5H' | 'WK' | 'other' | 'CTX' | 'TTL'
 
+// The parts that are usage windows, which have a pace.
+export type UsagePart = '5H' | 'WK' | 'other'
+
 // Keep-warm's caps for one TTL as the settings panel sets them: the most
 // pings, and the most hours on.
 export type CapSetting = { pings: number; hours: number }
@@ -49,30 +52,42 @@ export type CapSettings = Record<Ttl, CapSetting>
 // The caps in force: the most pings, and the most time on in milliseconds.
 export type Cap = { pings: number; ms: number }
 
-// The burn rate's settings: the window its pace is averaged over, in
-// minutes, and the unit it is printed in.
-export type BurnUnit = 'h' | 'min'
-export type Burn = { windowMin: number; unit: BurnUnit }
+// The unit a pace is printed in: percentage points an hour, a minute or a day.
+export type BurnUnit = 'h' | 'min' | 'day'
 
 // A usage window's percentage, kept when it moved, and the windows' samples
 // by kind with the reset time they belong to.
 export type Sample = { at: number; percent: number }
 export type History = Record<string, { resetsAt: string | null; samples: Sample[] }>
 
-// What the band shows of the pace: per window kind, its rate and when it
-// fills; and the unit.
-export type Pace = {
-  windows: Record<string, { perHour: number; fullAt: number | null }>
-  unit: BurnUnit
+// One part's pace settings: in which views the pace and its forecast show,
+// the window it is averaged over (minutes) and its unit.
+export type PaceSetting = { show: Record<View, boolean>; forecast: Record<View, boolean>; windowMin: number; unit: BurnUnit }
+
+// The settings, as one tree (../hooks/settings.ts): what each part shows in
+// each view, each usage part's pace, and keep-warm's caps by TTL.
+export type SettingsTree = {
+  show: Record<Part, Record<View, boolean>>
+  pace: Record<UsagePart, PaceSetting>
+  caps: CapSettings
 }
 
-// A session's own settings over the global ones, set only for the pieces the
-// session changed: a part hidden (true) or shown (false), a cap's value, the
-// burn rate's window or unit.
-export type SessionSettings = {
-  parts: Partial<Record<Part, boolean>>
-  caps: Partial<Record<Ttl, Partial<CapSetting>>>
-  burn: Partial<Burn>
+// A session's own settings: any leaf of the tree, set or not.
+export type SettingsOverride = {
+  show?: Partial<Record<Part, Partial<Record<View, boolean>>>>
+  pace?: Partial<
+    Record<
+      UsagePart,
+      { show?: Partial<Record<View, boolean>>; forecast?: Partial<Record<View, boolean>>; windowMin?: number; unit?: BurnUnit }
+    >
+  >
+  caps?: Partial<Record<Ttl, Partial<CapSetting>>>
+}
+
+// What the band shows of the pace: per window kind, its rate, when it fills
+// and the unit its part prints it in.
+export type Pace = {
+  windows: Record<string, { perHour: number; fullAt: number | null; unit: BurnUnit }>
 }
 
 // Which settings the panel edits: this session's own, or every session's.
@@ -186,8 +201,11 @@ export type BandProps = {
   cache: CacheState
   keepWarm: KeepWarm
   surface: 'terminal' | 'desktop' | 'mobile' | 'vscode'
-  // The parts the settings panel hides.
+  // The parts the settings panel hides in this view, and the usage parts
+  // whose pace, and whose forecast, it hides.
   hidden: Part[]
+  paceHidden: Part[]
+  forecastHidden: Part[]
   // Keep-warm's caps in force for this session's TTL.
   cap: Cap
   // The burn rates and forecasts.
@@ -199,6 +217,9 @@ declare module 'claude-code' {
     'token-watch': {
       reading: Reading | null
       limits: Limit[]
+      // When the windows in `limits` were reported after a response, this
+      // session's or another's (through the store); 0 until one was.
+      limitsAt: number
       nowMs: number
       isShown: boolean
       view: View
@@ -209,22 +230,18 @@ declare module 'claude-code' {
       // When the ping now out was sent, or null with none out: a second ping
       // waits for it, across a reload too.
       pingingSince: number | null
-      // The parts of the band hidden, and keep-warm's caps by TTL, in force
-      // in this session: the session's own settings over the global ones.
-      hidden: Part[]
-      caps: CapSettings
-      burn: Burn
-      // The global settings (saved, shared by every session) and this
-      // session's own (saved under its id), as the settings panel sets them.
-      globalHidden: Part[]
-      globalCaps: CapSettings
-      globalBurn: Burn
-      sessionSettings: SessionSettings
+      // The settings in force in this session (../hooks/settings.ts): its
+      // own over the global ones, leaf by leaf; the global settings (saved,
+      // shared by every session); and this session's own (saved under its id).
+      settings: SettingsTree
+      globalSettings: SettingsTree
+      override: SettingsOverride
       // The usage windows' samples, shared through the store, for the burn
       // rates.
       history: History
-      // Which of the two the settings panel edits.
+      // Which of the two the settings panel edits, and its open sections.
       scope: Scope
+      openSections: string[]
     }
   }
 }

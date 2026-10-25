@@ -2,7 +2,7 @@
 // spells its figures, so the band, the /context-bar reading and the usage
 // snapshot all say the same thing.
 
-import type { Cap, CacheState, KeepWarm, Limit, Part, Reading } from '../types'
+import type { Cap, CacheState, KeepWarm, Limit, Part, Reading, UsagePart } from '../types'
 import { TTL_MS } from './cache'
 
 // Usage windows by kind, in the order they are shown; any other window the
@@ -29,7 +29,7 @@ export function sorted(list: Limit[]) {
 }
 
 // The part of the band a usage window belongs to, for the settings panel.
-export function partOf(limit: Limit): Part {
+export function partOf(limit: Limit): UsagePart {
   return limit.kind === 'five_hour' ? '5H' : limit.kind === 'seven_day' ? 'WK' : 'other'
 }
 

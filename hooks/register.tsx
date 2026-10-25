@@ -34,13 +34,14 @@
 // ui.message: the band was clicked: { action: 'cycle' } (right click) moves
 //   to the next view, { action: 'keep-warm' } (the timer or the keep-warm
 //   button) toggles keep-warm, { action: 'refresh-caps' } starts its caps over.
-// ui.render (Pane, the settings panel): which parts of the band show,
-//   keep-warm's caps for this session's TTL and the burn rate's window and
-//   unit, for this session or for every
-//   session: a session's own setting overrides the global one for that piece.
-//   While the TTL row is hidden keep-warm stays off, so nothing spends out of
-//   sight. Every 30 s the global settings are read again, so a change another
-//   session made reaches this one.
+// ui.render (Pane, the settings panel): in collapsible sections, what each
+//   part shows in each view, each usage window's pace (in which views, over
+//   which window, in which unit) and keep-warm's caps for this session's TTL,
+//   for this session or for every session: a session's own setting overrides
+//   the global one, leaf by leaf (./settings.ts). While no view shows the
+//   cache keep-warm stays off, so nothing spends out of sight. Every 30 s the
+//   global settings are read again, so a change another session made reaches
+//   this one.
 //
 // Burn rates: each reading's usage windows are kept in the store where they
 // moved (./burn.ts), shared by every session since the windows are the
@@ -66,82 +67,88 @@ import type { EngineInterface, ModelForkResult, Register, Timer } from 'claude-c
 
 import type {
   BandProps,
-  Burn,
   Cap,
-  CapSetting,
-  CapSettings,
   KeepWarm,
   Limit,
   Pace,
-  Part,
   Reading,
   Scope,
-  SessionSettings,
+  SettingsOverride,
   Slice,
   Snapshot,
   TtlInputs,
+  UsagePart,
   View,
 } from '../types'
 import {
   BACKGROUND_ORIGINS,
-  BURN_WINDOWS,
   CAP_LIMITS,
   COLD_READ_SHARE,
-  DEFAULT_BURN,
   DEFAULT_CAPS,
   KEEP_WARM_OFF,
   MAX_FAILURES,
   MIN_WARM_READ,
   NO_CACHE,
   NO_INPUTS,
-  NO_SESSION_SETTINGS,
   PING_LOST_MS,
   PING_PROMPT,
   RETRY_MS,
   SESSION_SETTINGS_KEEP_MS,
   TTL_MS,
   caps,
-  effectiveBurn,
-  effectiveCaps,
-  effectiveHidden,
-  isEmptySession,
   isTtl,
   leadMs,
   nextView,
-  readBurn,
-  readCaps,
-  readSessionSettings,
   refreshMs,
   resolveTtl,
-  stepBurnWindow,
-  stepCap,
 } from './cache'
+import {
+  DEFAULT_SETTINGS,
+  PACE_UNITS,
+  PACE_WINDOWS,
+  VIEWS,
+  VIEW_NAMES,
+  dropAt,
+  forecastHiddenIn,
+  fromLegacy,
+  getAt,
+  hiddenIn,
+  isCacheHidden,
+  isEmptyOverride,
+  merge,
+  overridesUnder,
+  paceHiddenIn,
+  readOverride,
+  readSettings,
+  setAt,
+  stepIn,
+  windowText,
+} from './settings'
+import type { Path } from './settings'
 import { addReadings, fullAt, ratePerHour, readHistory } from './burn'
-import { PARTS, hmmss, isPart, label, partOf, readingLine, short, sorted } from './format'
+import { hmmss, label, partOf, readingLine, short, sorted } from './format'
 
 const reading = atom({ plugin: 'token-watch', key: 'reading' } as const, null)
 const isShown = atom({ plugin: 'token-watch', key: 'isShown' } as const, true)
 const view = atom({ plugin: 'token-watch', key: 'view' } as const, 'expanded')
 const limits = atom({ plugin: 'token-watch', key: 'limits' } as const, [])
+const limitsAt = atom({ plugin: 'token-watch', key: 'limitsAt' } as const, 0)
 const nowMs = atom({ plugin: 'token-watch', key: 'nowMs' } as const, 0)
 const working = atom({ plugin: 'token-watch', key: 'working' } as const, false)
 const ttlInputs = atom({ plugin: 'token-watch', key: 'ttlInputs' } as const, NO_INPUTS)
 const cache = atom({ plugin: 'token-watch', key: 'cache' } as const, NO_CACHE)
 const keepWarm = atom({ plugin: 'token-watch', key: 'keepWarm' } as const, KEEP_WARM_OFF)
 const pingingSince = atom({ plugin: 'token-watch', key: 'pingingSince' } as const, null)
-const hidden = atom({ plugin: 'token-watch', key: 'hidden' } as const, [])
-const capSettings = atom({ plugin: 'token-watch', key: 'caps' } as const, DEFAULT_CAPS)
-const globalHidden = atom({ plugin: 'token-watch', key: 'globalHidden' } as const, [])
-const globalCaps = atom({ plugin: 'token-watch', key: 'globalCaps' } as const, DEFAULT_CAPS)
-const sessionSettings = atom({ plugin: 'token-watch', key: 'sessionSettings' } as const, NO_SESSION_SETTINGS)
+const settings = atom({ plugin: 'token-watch', key: 'settings' } as const, DEFAULT_SETTINGS)
+const globalSettings = atom({ plugin: 'token-watch', key: 'globalSettings' } as const, DEFAULT_SETTINGS)
+const override = atom({ plugin: 'token-watch', key: 'override' } as const, {})
 const scope = atom({ plugin: 'token-watch', key: 'scope' } as const, 'session')
-const burn = atom({ plugin: 'token-watch', key: 'burn' } as const, DEFAULT_BURN)
-const globalBurn = atom({ plugin: 'token-watch', key: 'globalBurn' } as const, DEFAULT_BURN)
+const openSections = atom({ plugin: 'token-watch', key: 'openSections' } as const, [])
 const history = atom({ plugin: 'token-watch', key: 'history' } as const, {})
 
 // The settings panel's pane id, and its width when docked beside the transcript.
 const SETTINGS = 'token-watch-settings'
-const SETTINGS_COLUMNS = 44
+const SETTINGS_COLUMNS = 52
 
 // The settings button's label, a "menu" glyph: U+2630 on the desktop; in a
 // terminal U+2261, since recent Unicode makes the trigram U+2630 two cells
@@ -217,6 +224,8 @@ export const register: Register = (on, options) => {
     const saved = await $.store.get('limits')
     if (Array.isArray(saved)) {
       await update($, limits, () => saved as Limit[])
+      const savedAt = await $.store.get('limitsAt')
+      if (typeof savedAt === 'number') await update($, limitsAt, () => savedAt)
     }
     if (snapshotOn) {
       snapshotPath = await resolveSnapshotPath($)
@@ -224,13 +233,15 @@ export const register: Register = (on, options) => {
     const inputs = await readTtlInputs($)
     await update($, ttlInputs, () => inputs)
     await settleTtl($)
-    await takeReading($)
+    // A start's reading counts as fresh only while no session has stamped
+    // one (a new store, or 1.3.0's): it never puts older figures over newer.
+    await takeReading($, (await read($, limitsAt)) === 0)
     $.clock.every(HEARTBEAT_MS, () => void tick($).then(() => heartbeat($)).catch(() => {}))
     // The ping timer is a module variable a hot reload drops, while
     // keep-warm's state lives in $.state: arm it again. Unless the TTL row is
     // now hidden (another session, sharing the store, hid it): then off.
     if ((await read($, keepWarm)).on) {
-      if ((await read($, hidden)).includes('TTL')) {
+      if (isCacheHidden(await read($, settings))) {
         await stopKeepWarm($, null)
         await writeSnapshot($)
       } else {
@@ -243,10 +254,11 @@ export const register: Register = (on, options) => {
 
   on('session.measure', async ($, e, next) => {
     const result = await next(e)
-    // The snapshot follows every reading, band or no band.
+    // The snapshot follows every reading, band or no band. A reading here
+    // follows a response, so its windows are fresh: the store gets them too.
     if (snapshotOn || (await read($, isShown))) {
       await tick($)
-      await takeReading($)
+      await takeReading($, true)
     }
 
     return result
@@ -388,48 +400,139 @@ export const register: Register = (on, options) => {
   })
 
   // The settings panel. At the top, which settings it edits: this session's
-  // own, which override the global ones piece by piece, or every session's.
-  // Then a toggle per part of the band, in the order the band draws them,
-  // "[○] 5H: 5-hour window", and keep-warm's caps for this session's TTL. The
-  // Buttons are the marks alone; the names sit in a column of their own so
-  // the descriptions line up, and a long description wraps under itself. A
-  // piece this session overrides has a reset in this session's scope, and a
-  // note in every session's. A docked pane, so it stays beside the
-  // transcript while the band changes under it.
+  // own, which override the global ones leaf by leaf, or every session's.
+  // Then collapsible sections: Usage (a section per window: in which views it
+  // shows, and its pace's views, window and unit), Context, and Cache (its
+  // views and keep-warm's caps for this session's TTL). The Buttons are the
+  // marks alone, the labels beside them. A row this session overrides has a
+  // reset in this session's scope, and a note in every session's. A docked
+  // pane, so it stays beside the transcript while the band changes under it.
   on('ui.render', { component: 'Pane', requestId: SETTINGS }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
-    // Marks: ☑ / ☐ for a toggle and ◉ / ○ for a choice in the desktop's native
-    // button; [●] / [○] for both in a terminal, bracketed with no spaces,
-    // where ☑ may draw as a wide emoji.
+    // Marks: ☑ / ☐ for a toggle, ◉ / ○ for a choice and ▸ / ▾ for a section in
+    // the desktop's native button; in a terminal bracketed with no spaces,
+    // [●] / [○] for both kinds (☑ may draw as a wide emoji) and [▸] / [▾].
     const isTerminal = e.surface === 'terminal'
     const plain = isTerminal || undefined
-    const mark = (isOn: boolean) => (isTerminal ? `[${isOn ? '\u25cf' : '\u25cb'}]` : isOn ? '\u2611' : '\u2610')
-    const choice = (isOn: boolean) => (isTerminal ? `[${isOn ? '\u25cf' : '\u25cb'}]` : isOn ? '\u25c9' : '\u25cb')
-    const bracketed = (text: string) => (isTerminal ? `[${text}]` : text)
-    // The name column: the longest name and its colon, and on the desktop a
-    // cell of slack for its proportional font.
-    const nameWidth = Math.max(...PARTS.map(([, name]) => name.length)) + (isTerminal ? 1 : 2)
-    const capWidth = 'Hours:'.length + (isTerminal ? 0 : 1)
-    const burnWidth = 'Window:'.length + (isTerminal ? 0 : 1)
+    const wrap = (glyph: string) => (isTerminal ? `[${glyph}]` : glyph)
+    const mark = (isOn: boolean) => (isTerminal ? wrap(isOn ? '\u25cf' : '\u25cb') : isOn ? '\u2611' : '\u2610')
+    const choice = (isOn: boolean) => wrap(isOn ? (isTerminal ? '\u25cf' : '\u25c9') : '\u25cb')
     const isGlobal = await editsGlobal($)
     const hasSession = (await sessionKey($)) !== null
-    const session = await read($, sessionSettings)
-    // What each piece reads in the scope shown: every session's setting, or
-    // this session's in force.
-    const off = isGlobal ? await read($, globalHidden) : await read($, hidden)
+    const own = await read($, override)
+    // What each leaf reads in the scope shown.
+    const shown = isGlobal ? await read($, globalSettings) : await read($, settings)
+    const open = await read($, openSections)
     const ttl = (await read($, cache)).ttl
-    const shownCaps = isGlobal ? await read($, globalCaps) : await read($, capSettings)
-    const shownBurn = isGlobal ? await read($, globalBurn) : await read($, burn)
-    const overridden = (
-      <Text dimColor wrap="truncate">
-        overridden here
-      </Text>
+    const capWidth = 'Hours:'.length + (isTerminal ? 0 : 1)
+    const paceWidth = 'Window:'.length + (isTerminal ? 0 : 1)
+
+    // A row's override marker: a reset in this session's scope, a note in
+    // every session's.
+    const marker = (path: Path) =>
+      !overridesUnder(own, path) ? null : isGlobal ? (
+        <Text key={`over-${path.join('-')}`} dimColor wrap="truncate">
+          overridden here
+        </Text>
+      ) : (
+        <Button key={`reset-${path.join('-')}`} plain={plain} dimColor onPress={() => void resetSetting($, path)}>
+          {wrap('reset')}
+        </Button>
+      )
+    // A section's heading, which opens and closes it, and its body indented.
+    const section = (id: string, title: string, body: () => unknown) => {
+      const isOpen = open.includes(id)
+      return (
+        <Box key={id} flexDirection="column">
+          <Box flexDirection="row" columnGap={1}>
+            <Button key={`section-${id}`} plain={plain} onPress={() => void toggleSection($, id)}>
+              {wrap(isOpen ? '\u25be' : '\u25b8')}
+            </Button>
+            <Text bold>{title}</Text>
+          </Box>
+          {isOpen && (
+            <Box flexDirection="column" paddingLeft={2}>
+              {body() as never}
+            </Box>
+          )}
+        </Box>
+      )
+    }
+    // A row of the three views, each toggled on its own.
+    const views = (title: string, path: Path, key: string) => (
+      <Box key={key} flexDirection="column">
+        <Box flexDirection="row" columnGap={1}>
+          <Text>{title}</Text>
+          {marker(path)}
+        </Box>
+        <Box flexDirection="row" columnGap={1} flexWrap="wrap" paddingLeft={2}>
+          {VIEWS.map(v => {
+            const isOn = getAt(shown, [...path, v]) === true
+            return (
+              <Box key={v} flexDirection="row" columnGap={1} flexShrink={0}>
+                <Button key={`${key}-${v}`} plain={plain} onPress={() => void setSetting($, [...path, v], !isOn)}>
+                  {mark(isOn)}
+                </Button>
+                <Text>{VIEW_NAMES[v]}</Text>
+              </Box>
+            )
+          })}
+        </Box>
+      </Box>
     )
-    const reset = (key: string, onPress: () => void) => (
-      <Button key={key} plain={plain} dimColor onPress={onPress}>
-        {bracketed('reset')}
-      </Button>
+    // A stepper: label, [-], value, [+], dimmed at the ends.
+    const stepper = (key: string, title: string, width: number, value: string, atMin: boolean, atMax: boolean, by: (d: 1 | -1) => void, over: Path) => (
+      <Box key={key} flexDirection="row" columnGap={1}>
+        <Box width={width} flexShrink={0}>
+          <Text>{title}</Text>
+        </Box>
+        <Button key={`${key}-down`} plain={plain} dimColor={atMin} onPress={() => by(-1)}>
+          {isTerminal ? '[-]' : '\u2212'}
+        </Button>
+        <Text>{value}</Text>
+        <Button key={`${key}-up`} plain={plain} dimColor={atMax} onPress={() => by(1)}>
+          {isTerminal ? '[+]' : '+'}
+        </Button>
+        {marker(over)}
+      </Box>
     )
+    const usage = (part: UsagePart, name: string) => {
+      const pace = shown.pace[part]
+      const windows = PACE_WINDOWS[part]
+      return section(`usage-${part}`, name, () => (
+        <Box flexDirection="column">
+          {views('Show on band', ['show', part], `show-${part}`)}
+          {views('Burn forecast', ['pace', part, 'forecast'], `forecast-${part}`)}
+          {views('Burn rate', ['pace', part, 'show'], `pace-${part}`)}
+          <Box flexDirection="column" paddingLeft={2}>
+            {stepper(
+              `window-${part}`,
+              'Window:',
+              paceWidth,
+              windowText(pace.windowMin),
+              pace.windowMin <= windows[0]!,
+              pace.windowMin >= windows[windows.length - 1]!,
+              by => void setSetting($, ['pace', part, 'windowMin'], stepIn(windows, pace.windowMin, by)),
+              ['pace', part, 'windowMin'],
+            )}
+            <Box flexDirection="row" columnGap={1}>
+              <Box width={paceWidth} flexShrink={0}>
+                <Text>Unit:</Text>
+              </Box>
+              {PACE_UNITS[part].map(unit => (
+                <Box key={unit} flexDirection="row" columnGap={1} flexShrink={0}>
+                  <Button key={`unit-${part}-${unit}`} plain={plain} onPress={() => void setSetting($, ['pace', part, 'unit'], unit)}>
+                    {choice(pace.unit === unit)}
+                  </Button>
+                  <Text>{`%/${unit}`}</Text>
+                </Box>
+              ))}
+              {marker(['pace', part, 'unit'])}
+            </Box>
+          </Box>
+        </Box>
+      ))
+    }
     return (
       <Box flexDirection="column" rowGap={1} paddingX={1}>
         {hasSession && (
@@ -453,115 +556,70 @@ export const register: Register = (on, options) => {
                 ? 'Changes apply to every session, except where one has its own setting.'
                 : 'Changes apply to this session only, over the settings for all sessions.'}
             </Text>
+            {/* In this session's scope, every setting of its own back to the
+                settings for all sessions; in every session's, those back to
+                the defaults. Dim with nothing to reset. */}
+            <Box flexDirection="row">
+              {isGlobal ? (
+                <Button
+                  key="reset-defaults"
+                  plain={plain}
+                  dimColor={JSON.stringify(shown) === JSON.stringify(DEFAULT_SETTINGS)}
+                  onPress={() => void resetDefaults($)}
+                >
+                  {wrap('Reset to defaults')}
+                </Button>
+              ) : (
+                <Button
+                  key="reset-session"
+                  plain={plain}
+                  dimColor={isEmptyOverride(own)}
+                  onPress={() => void resetSession($)}
+                >
+                  {wrap('Reset this session')}
+                </Button>
+              )}
+            </Box>
           </Box>
         )}
-        <Text bold>Show in the band</Text>
-        <Box flexDirection="column">
-          {PARTS.map(([part, name, what]) => {
-            const isOverridden = session.parts[part] !== undefined
-            return (
-              <Box key={part} flexDirection="row" columnGap={1}>
-                <Button key={`part-${part}`} plain={plain} onPress={() => void togglePart($, part)}>
-                  {mark(!off.includes(part))}
-                </Button>
-                <Box width={nameWidth} flexShrink={0}>
-                  <Text>{`${name}:`}</Text>
-                </Box>
-                <Box flexShrink={1} minWidth={0}>
-                  <Text dimColor wrap="wrap">
-                    {what}
-                  </Text>
-                </Box>
-                {isOverridden && !isGlobal && reset(`reset-part-${part}`, () => void resetPart($, part))}
-                {isOverridden && isGlobal && overridden}
-              </Box>
-            )
-          })}
-        </Box>
-        <Text dimColor wrap="wrap">
-          Hiding TTL turns keep-warm off.
-        </Text>
-        <Text bold>{`Keep-warm caps (${ttl} TTL)`}</Text>
-        <Box flexDirection="column">
-          {(['pings', 'hours'] as const).map(which => {
-            const value = shownCaps[ttl][which]
-            const { min, max } = CAP_LIMITS[ttl][which]
-            const isOverridden = session.caps[ttl]?.[which] !== undefined
-            return (
-              <Box key={which} flexDirection="row" columnGap={1}>
-                <Box width={capWidth} flexShrink={0}>
-                  <Text>{which === 'pings' ? 'Pings:' : 'Hours:'}</Text>
-                </Box>
-                <Button key={`${which}-down`} plain={plain} dimColor={value <= min} onPress={() => void stepCaps($, which, -1)}>
-                  {isTerminal ? '[-]' : '\u2212'}
-                </Button>
-                <Text>{String(value)}</Text>
-                <Button key={`${which}-up`} plain={plain} dimColor={value >= max} onPress={() => void stepCaps($, which, 1)}>
-                  {isTerminal ? '[+]' : '+'}
-                </Button>
-                {isOverridden && !isGlobal && reset(`reset-${which}`, () => void resetCap($, which))}
-                {isOverridden && isGlobal && overridden}
-              </Box>
-            )
-          })}
-          {/* Every session's caps go back to the defaults; in this session's
-              scope each overridden cap has its own reset. */}
-          {isGlobal && (
-            <Box flexDirection="row" columnGap={1}>
-              <Box width={capWidth} flexShrink={0} />
-              <Button key="caps-reset" plain={plain} onPress={() => void resetCaps($)}>
-                {bracketed('Defaults')}
-              </Button>
-            </Box>
-          )}
-        </Box>
-        <Text dimColor wrap="wrap">
-          {`Defaults: ${DEFAULT_CAPS[ttl].pings} pings or ${DEFAULT_CAPS[ttl].hours} hours. A running keep-warm already past a new cap stops.`}
-        </Text>
-        <Text bold>Burn rate</Text>
-        <Box flexDirection="column">
-          <Box flexDirection="row" columnGap={1}>
-            <Box width={burnWidth} flexShrink={0}>
-              <Text>Window:</Text>
-            </Box>
-            <Button
-              key="burn-window-down"
-              plain={plain}
-              dimColor={shownBurn.windowMin <= BURN_WINDOWS[0]!}
-              onPress={() => void setBurn($, b => ({ windowMin: stepBurnWindow(b.windowMin, -1) }))}
-            >
-              {isTerminal ? '[-]' : '−'}
-            </Button>
-            <Text>{`${shownBurn.windowMin} min`}</Text>
-            <Button
-              key="burn-window-up"
-              plain={plain}
-              dimColor={shownBurn.windowMin >= BURN_WINDOWS[BURN_WINDOWS.length - 1]!}
-              onPress={() => void setBurn($, b => ({ windowMin: stepBurnWindow(b.windowMin, 1) }))}
-            >
-              {isTerminal ? '[+]' : '+'}
-            </Button>
-            {session.burn.windowMin !== undefined && !isGlobal && reset('reset-burn-window', () => void resetBurn($, 'windowMin'))}
-            {session.burn.windowMin !== undefined && isGlobal && overridden}
+        {section('usage', 'Usage', () => (
+          <Box flexDirection="column">
+            {usage('5H', '5H')}
+            {usage('WK', 'WK')}
+            {usage('other', 'OTH')}
           </Box>
-          <Box flexDirection="row" columnGap={1}>
-            <Box width={burnWidth} flexShrink={0}>
-              <Text>Unit:</Text>
+        ))}
+        {section('context', 'Context', () => views('Show on band', ['show', 'CTX'], 'show-CTX'))}
+        {section('cache', 'Cache', () => (
+          <Box flexDirection="column">
+            {views('Show on band', ['show', 'TTL'], 'show-TTL')}
+            <Text dimColor wrap="wrap">
+              Hidden in every view, keep-warm turns off.
+            </Text>
+            <Text>{`Limits (${ttl} TTL)`}</Text>
+            <Box flexDirection="column" paddingLeft={2}>
+              {(['pings', 'hours'] as const).map(which => {
+                const value = shown.caps[ttl][which]
+                const { min, max, step } = CAP_LIMITS[ttl][which]
+                return stepper(
+                  which,
+                  which === 'pings' ? 'Pings:' : 'Hours:',
+                  capWidth,
+                  String(value),
+                  value <= min,
+                  value >= max,
+                  by => void setSetting($, ['caps', ttl, which], Math.min(max, Math.max(min, value + by * step))),
+                  ['caps', ttl, which],
+                )
+              })}
             </Box>
-            {(['h', 'min'] as const).map(unit => (
-              <Box key={unit} flexDirection="row" columnGap={1} flexShrink={0}>
-                <Button key={`burn-unit-${unit}`} plain={plain} onPress={() => void setBurn($, () => ({ unit }))}>
-                  {choice(shownBurn.unit === unit)}
-                </Button>
-                <Text>{`%/${unit}`}</Text>
-              </Box>
-            ))}
-            {session.burn.unit !== undefined && !isGlobal && reset('reset-burn-unit', () => void resetBurn($, 'unit'))}
-            {session.burn.unit !== undefined && isGlobal && overridden}
+            <Text dimColor wrap="wrap">
+              {`Defaults: ${DEFAULT_CAPS[ttl].pings} pings or ${DEFAULT_CAPS[ttl].hours} hours. A running keep-warm already past a new cap stops.`}
+            </Text>
           </Box>
-        </Box>
+        ))}
         <Text dimColor wrap="wrap">
-          A usage window's pace is averaged over the window, once it holds 5 minutes of readings. /context-bar settings opens this panel again.
+          A pace is averaged over its window, once that holds 5 minutes of readings. /context-bar settings opens this panel again.
         </Text>
       </Box>
     )
@@ -580,9 +638,11 @@ export const register: Register = (on, options) => {
     if (e.surface !== 'terminal' && e.surface !== 'desktop') return below
     const { Box, Button, Client, Text } = $.ui.resolve(e)
     const clock = await read($, nowMs)
-    const off = await read($, hidden)
+    const inForce = await read($, settings)
     const windows = current(await read($, limits), clock)
     const bandView = await read($, view)
+    const off = hiddenIn(inForce, bandView)
+    const k = await read($, keepWarm)
     const props: BandProps = {
       reading: now,
       limits: windows,
@@ -590,9 +650,11 @@ export const register: Register = (on, options) => {
       view: bandView,
       isWorking: e.props.isWorking || (await read($, working)),
       cache: await read($, cache),
-      keepWarm: await read($, keepWarm),
+      keepWarm: k,
       surface: e.surface,
       hidden: off,
+      paceHidden: paceHiddenIn(inForce, bandView),
+      forecastHidden: forecastHiddenIn(inForce, bandView),
       cap: await currentCap($),
       pace: await paceOf($, windows, clock),
     }
@@ -600,10 +662,14 @@ export const register: Register = (on, options) => {
     // The settings button sits outside the band, beside it: a press on a
     // Button inside a Client reaches the hooks module as a message, which the
     // engine does not count as the person's own, and an unasked pane opens
-    // only on a terminal 144 columns wide. Drawn in the expanded view, and in
-    // a collapsed one with every part hidden, where it is the way back.
+    // only on a terminal 144 columns wide. Drawn in the expanded view; in a
+    // collapsed one with every part hidden, where it is the way back; and
+    // wherever keep-warm runs in a view that hides the cache, marked (●) so
+    // the pings are never wholly out of sight.
     const nothingShown = windows.every(w => off.includes(partOf(w))) && off.includes('CTX') && off.includes('TTL')
-    const hasMenu = bandView === 'expanded' || nothingShown
+    const isWarmUnseen = k.on && off.includes('TTL')
+    const hasMenu = bandView === 'expanded' || nothingShown || isWarmUnseen
+    const menuMark = isWarmUnseen ? (e.surface === 'terminal' ? '\u25cf' : ' \u25cf') : ''
     return (
       <Box flexDirection="column">
         {below}
@@ -619,7 +685,7 @@ export const register: Register = (on, options) => {
             <Box flexDirection="column" flexShrink={0}>
               <Text> </Text>
               <Button key="settings" plain onPress={() => void openSettings($)}>
-                {e.surface === 'terminal' ? `[${MENU_TERMINAL}]` : MENU}
+                {e.surface === 'terminal' ? `[${MENU_TERMINAL}${menuMark}]` : `${MENU}${menuMark}`}
               </Button>
             </Box>
           )}
@@ -629,10 +695,17 @@ export const register: Register = (on, options) => {
   })
 }
 
-async function takeReading($: EngineInterface) {
+// A reading: the context, and the usage windows. Claude Code reports the
+// windows a session's own last response carried, so they are only as new as
+// that response. A reading that follows one (`isFresh`, session.measure)
+// replaces the windows, here and in the store with its time, for every
+// session to pick up (the heartbeat); any other (a start, /context-bar)
+// fills them only while there are none, and leaves the store alone, so it
+// never puts older figures over newer ones.
+async function takeReading($: EngineInterface, isFresh = false) {
   try {
     const { context, rateLimits } = await $.session.usage({ breakdown: 'summary' })
-    if (rateLimits.length > 0) {
+    if (rateLimits.length > 0 && (isFresh || (await read($, limits)).length === 0)) {
       const reported: Limit[] = rateLimits.map(({ kind, percentUsed, resetsAt }) => ({ kind, percentUsed, resetsAt }))
       // A window the reading leaves out keeps its last values until its reset
       // time; one still left out after that is no longer part of the plan.
@@ -642,12 +715,16 @@ async function takeReading($: EngineInterface) {
       )
       const windows = [...reported, ...kept]
       await update($, limits, () => windows)
-      await $.store.set('limits', windows)
-      // Read the store's samples first: another session may have added some.
-      const before = readHistory(await $.store.get('history'))
-      const after = addReadings(before, reported, now)
-      await update($, history, () => after)
-      if (after !== before) await $.store.set('history', after)
+      if (isFresh) {
+        await update($, limitsAt, () => now)
+        await $.store.set('limits', windows)
+        await $.store.set('limitsAt', now)
+        // Read the store's samples first: another session may have added some.
+        const before = readHistory(await $.store.get('history'))
+        const after = addReadings(before, reported, now)
+        await update($, history, () => after)
+        if (after !== before) await $.store.set('history', after)
+      }
     }
     const breakdown = context.breakdown
     if (breakdown && breakdown.rawMaxTokens) {
@@ -761,7 +838,7 @@ async function openSettings($: EngineInterface) {
 
 // Keep-warm's caps in force: the settings panel's, for this session's TTL.
 async function currentCap($: EngineInterface) {
-  return caps((await read($, cache)).ttl, await read($, capSettings))
+  return caps((await read($, cache)).ttl, (await read($, settings)).caps)
 }
 
 // Why keep-warm has reached its caps, as its stop note says it, or null.
@@ -777,63 +854,51 @@ async function sessionKey($: EngineInterface) {
   return id ? `session:${id}` : null
 }
 
-// The settings read back from the store: the global ones and this session's
-// own. Each is put in place, and the settings in force worked out again, only
-// when something changed, so the band redraws and keep-warm is held to them
-// only then. `touch` (a session's start) applies them whatever, and saves
-// this session's own again to keep them from being pruned.
+// The settings read back from the store: the global tree (1.3.0's keys read
+// once into it where it has not been saved yet) and this session's own. Each
+// is put in place, and the settings in force worked out again, only when
+// something changed, so the band redraws and keep-warm is held to them only
+// then. `touch` (a session's start) applies them whatever, and saves this
+// session's own again to keep them from being pruned.
 async function loadSettings($: EngineInterface, touch = false) {
-  const savedHidden = await $.store.get('hidden')
-  const nextHidden: Part[] = Array.isArray(savedHidden) ? savedHidden.filter(isPart) : []
-  const nextCaps = readCaps(await $.store.get('caps'))
-  const nextBurn = readBurn(await $.store.get('burn'))
+  const saved = await $.store.get('settings')
+  const nextGlobal =
+    saved === undefined ? fromLegacy(await $.store.get('hidden'), await $.store.get('caps')) : readSettings(saved)
   const key = await sessionKey($)
-  const nextSession = key === null ? NO_SESSION_SETTINGS : readSessionSettings(await $.store.get(key))
+  const kept = key === null ? undefined : ((await $.store.get(key)) as { settings?: unknown } | undefined)
+  const nextOwn = readOverride(kept?.settings)
   const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
   let isChanged = false
-  if (!same(await read($, globalHidden), nextHidden)) {
-    await update($, globalHidden, () => nextHidden)
+  if (!same(await read($, globalSettings), nextGlobal)) {
+    await update($, globalSettings, () => nextGlobal)
     isChanged = true
   }
-  if (!same(await read($, globalCaps), nextCaps)) {
-    await update($, globalCaps, () => nextCaps)
+  if (!same(await read($, override), nextOwn)) {
+    await update($, override, () => nextOwn)
     isChanged = true
   }
-  if (!same(await read($, globalBurn), nextBurn)) {
-    await update($, globalBurn, () => nextBurn)
-    isChanged = true
-  }
-  if (!same(await read($, sessionSettings), nextSession)) {
-    await update($, sessionSettings, () => nextSession)
-    isChanged = true
-  }
-  if (touch && key !== null && !isEmptySession(nextSession)) await saveSession($, nextSession)
+  if (touch && key !== null && !isEmptyOverride(nextOwn)) await saveOverride($, nextOwn)
   if (isChanged || touch) await applySettings($)
 }
 
-// The settings in force, from the global ones and this session's own; then
-// keep-warm held to them: off while the TTL row is hidden, stopped if past
+// The settings in force, the session's leaves over the global ones; then
+// keep-warm held to them: off while no view shows the cache, stopped if past
 // its caps.
 async function applySettings($: EngineInterface) {
-  const session = await read($, sessionSettings)
-  const nextHidden = effectiveHidden(await read($, globalHidden), session)
-  const nextCaps = effectiveCaps(await read($, globalCaps), session)
-  if (JSON.stringify(await read($, hidden)) !== JSON.stringify(nextHidden)) await update($, hidden, () => nextHidden)
-  if (JSON.stringify(await read($, capSettings)) !== JSON.stringify(nextCaps)) await update($, capSettings, () => nextCaps)
-  const nextBurn = effectiveBurn(await read($, globalBurn), session)
-  if (JSON.stringify(await read($, burn)) !== JSON.stringify(nextBurn)) await update($, burn, () => nextBurn)
-  if (nextHidden.includes('TTL') && (await read($, keepWarm)).on) await stopKeepWarm($, null)
+  const next = merge(await read($, globalSettings), await read($, override))
+  if (JSON.stringify(await read($, settings)) !== JSON.stringify(next)) await update($, settings, () => next)
+  if (isCacheHidden(next) && (await read($, keepWarm)).on) await stopKeepWarm($, null)
   await holdToCaps($)
 }
 
 // This session's own settings saved under its id, with when, so ones left by
 // sessions long gone can be pruned; none left, the key is removed.
-async function saveSession($: EngineInterface, next: SessionSettings) {
-  await update($, sessionSettings, () => next)
+async function saveOverride($: EngineInterface, next: SettingsOverride) {
+  await update($, override, () => next)
   const key = await sessionKey($)
   if (key === null) return
-  if (isEmptySession(next)) await $.store.delete(key)
-  else await $.store.set(key, { ...next, seenAt: await $.clock.now() })
+  if (isEmptyOverride(next)) await $.store.delete(key)
+  else await $.store.set(key, { settings: next, seenAt: await $.clock.now() })
 }
 
 // Session settings not saved for SESSION_SETTINGS_KEEP_MS, and any that do
@@ -861,114 +926,59 @@ async function setScope($: EngineInterface, next: Scope) {
   await update($, scope, () => next)
 }
 
-// A part shown or hidden in the scope the panel edits. In this session's
-// scope, a part put back to the global setting no longer overrides it.
-async function togglePart($: EngineInterface, part: Part) {
-  const gHidden = await read($, globalHidden)
+async function toggleSection($: EngineInterface, id: string) {
+  await update($, openSections, open => (open.includes(id) ? open.filter(s => s !== id) : [...open, id]))
+}
+
+// One leaf set in the scope the panel edits. In this session's scope, a leaf
+// set to the global value no longer overrides it.
+async function setSetting($: EngineInterface, path: Path, value: unknown) {
+  const global = await read($, globalSettings)
   if (await editsGlobal($)) {
-    const next = gHidden.includes(part) ? gHidden.filter(p => p !== part) : [...gHidden, part]
-    await update($, globalHidden, () => next)
-    await $.store.set('hidden', next)
+    const next = setAt(global, path, value)
+    await update($, globalSettings, () => next)
+    await $.store.set('settings', next)
   } else {
-    const session = await read($, sessionSettings)
-    const hide = !(await read($, hidden)).includes(part)
-    const { [part]: _dropped, ...rest } = session.parts
-    const parts = hide === gHidden.includes(part) ? rest : { ...rest, [part]: hide }
-    await saveSession($, { ...session, parts })
+    const own = await read($, override)
+    await saveOverride($, getAt(global, path) === value ? dropAt(own, path) : setAt(own, path, value))
   }
   await applySettings($)
 }
 
-// A part back to the global setting in this session.
-async function resetPart($: EngineInterface, part: Part) {
-  const session = await read($, sessionSettings)
-  const { [part]: _dropped, ...parts } = session.parts
-  await saveSession($, { ...session, parts })
+// Every setting of this session's own cleared: the settings for all sessions
+// again, throughout.
+async function resetSession($: EngineInterface) {
+  await saveOverride($, {})
   await applySettings($)
 }
 
-// One of this session's TTL's caps moved a step in the scope the panel edits.
-// In this session's scope, a value put back to the global one no longer
-// overrides it.
-async function stepCaps($: EngineInterface, which: keyof CapSetting, by: 1 | -1) {
-  const ttl = (await read($, cache)).ttl
-  const g = await read($, globalCaps)
-  if (await editsGlobal($)) {
-    const next = stepCap(g, ttl, which, by)
-    await update($, globalCaps, () => next)
-    await $.store.set('caps', next)
-  } else {
-    const session = await read($, sessionSettings)
-    const value = stepCap(await read($, capSettings), ttl, which, by)[ttl][which]
-    await saveSession($, withCap(session, ttl, which, value === g[ttl][which] ? undefined : value))
-  }
+// A row's leaves back to the global settings in this session.
+async function resetSetting($: EngineInterface, path: Path) {
+  await saveOverride($, dropAt(await read($, override), path))
   await applySettings($)
 }
 
-// One cap back to the global value in this session.
-async function resetCap($: EngineInterface, which: keyof CapSetting) {
-  const ttl = (await read($, cache)).ttl
-  await saveSession($, withCap(await read($, sessionSettings), ttl, which, undefined))
-  await applySettings($)
-}
-
-// Every session's caps back to the defaults (the Defaults button, drawn only
-// in every session's scope).
-async function resetCaps($: EngineInterface) {
+// Every session's settings back to the defaults (the button drawn in every
+// session's scope); a session's own settings stay over them.
+async function resetDefaults($: EngineInterface) {
   if (!(await editsGlobal($))) return
-  await update($, globalCaps, () => DEFAULT_CAPS)
-  await $.store.set('caps', DEFAULT_CAPS)
+  await update($, globalSettings, () => DEFAULT_SETTINGS)
+  await $.store.set('settings', DEFAULT_SETTINGS)
   await applySettings($)
 }
 
-// The burn rate's window a step longer or shorter, or its unit chosen, in
-// the scope the panel edits; in this session's, one put back to the global
-// setting no longer overrides it.
-async function setBurn($: EngineInterface, change: (b: Burn) => Partial<Burn>) {
-  const g = await read($, globalBurn)
-  if (await editsGlobal($)) {
-    const next = { ...g, ...change(g) }
-    await update($, globalBurn, () => next)
-    await $.store.set('burn', next)
-  } else {
-    const session = await read($, sessionSettings)
-    const wanted = { ...session.burn, ...change(await read($, burn)) }
-    const burnOverride: Partial<Burn> = {}
-    if (wanted.windowMin !== undefined && wanted.windowMin !== g.windowMin) burnOverride.windowMin = wanted.windowMin
-    if (wanted.unit !== undefined && wanted.unit !== g.unit) burnOverride.unit = wanted.unit
-    await saveSession($, { ...session, burn: burnOverride })
-  }
-  await applySettings($)
-}
-
-// One of the burn rate's settings back to the global in this session.
-async function resetBurn($: EngineInterface, which: keyof Burn) {
-  const session = await read($, sessionSettings)
-  const { [which]: _dropped, ...rest } = session.burn
-  await saveSession($, { ...session, burn: rest })
-  await applySettings($)
-}
-
-// The pace the band shows, now: each window's rate over the burn window and
-// when it fills.
+// The pace the band shows, now: each window's rate over its part's window,
+// when it fills, and the unit its part prints it in.
 async function paceOf($: EngineInterface, windows: Limit[], now: number): Promise<Pace> {
-  const b = await read($, burn)
-  const windowMs = b.windowMin * 60_000
+  const inForce = await read($, settings)
   const h = await read($, history)
-  const pace: Pace = { windows: {}, unit: b.unit }
+  const pace: Pace = { windows: {} }
   for (const w of windows) {
-    const perHour = ratePerHour(h[w.kind]?.samples ?? [], now, windowMs)
-    if (perHour !== null) pace.windows[w.kind] = { perHour, fullAt: fullAt(w.percentUsed, perHour, now, w.resetsAt) }
+    const { windowMin, unit } = inForce.pace[partOf(w)]
+    const perHour = ratePerHour(h[w.kind]?.samples ?? [], now, windowMin * 60_000)
+    if (perHour !== null) pace.windows[w.kind] = { perHour, fullAt: fullAt(w.percentUsed, perHour, now, w.resetsAt), unit }
   }
   return pace
-}
-
-// A session's settings with one cap set, or left to the global (undefined).
-function withCap(s: SessionSettings, ttl: keyof CapSettings, which: keyof CapSetting, value: number | undefined) {
-  const { [which]: _dropped, ...rest } = s.caps[ttl] ?? {}
-  const cap = value === undefined ? rest : { ...rest, [which]: value }
-  const { [ttl]: _gone, ...others } = s.caps
-  return { ...s, caps: Object.keys(cap).length === 0 ? others : { ...others, [ttl]: cap } }
 }
 
 // Keep-warm held to the caps in force: a running keep-warm already past them
@@ -987,7 +997,7 @@ async function holdToCaps($: EngineInterface) {
 // is making one), else off. Pressed with nothing warm to keep, a note says so.
 // Not while the TTL row is hidden (a press from a band drawn before it was).
 async function toggleKeepWarm($: EngineInterface) {
-  if ((await read($, hidden)).includes('TTL')) return
+  if (isCacheHidden(await read($, settings))) return
   await tick($)
   const now = await read($, nowMs)
   const k = await read($, keepWarm)
@@ -1047,7 +1057,7 @@ async function arm($: EngineInterface) {
   const k = await read($, keepWarm)
   const c = await read($, cache)
   if (!k.on || c.warmUntil === null || (await read($, working))) return
-  if ((await read($, hidden)).includes('TTL')) {
+  if (isCacheHidden(await read($, settings))) {
     await stopKeepWarm($, null)
     return await writeSnapshot($)
   }
@@ -1090,9 +1100,9 @@ async function ping($: EngineInterface) {
     const sentAt = await read($, nowMs)
     // While the TTL row is hidden keep-warm stays off: however it came to be
     // on (another session hid the row, a press raced the toggle), it stops here.
-    if ((await read($, hidden)).includes('TTL')) return await stopKeepWarm($, null)
+    if (isCacheHidden(await read($, settings))) return await stopKeepWarm($, null)
     if (sentAt >= c.warmUntil) return await stopKeepWarm($, 'stopped: cache went cold')
-    const reached = capReached(k, caps(c.ttl, await read($, capSettings)), sentAt)
+    const reached = capReached(k, caps(c.ttl, (await read($, settings)).caps), sentAt)
     if (reached !== null) return await stopKeepWarm($, reached)
 
     let result: ModelForkResult | null = null
@@ -1202,7 +1212,7 @@ async function writeSnapshot($: EngineInterface, force = false) {
     const latest = await read($, reading)
     const c = await read($, cache)
     const k = await read($, keepWarm)
-    const cap = caps(c.ttl, await read($, capSettings))
+    const cap = caps(c.ttl, (await read($, settings)).caps)
     const iso = (ms: number) => new Date(ms).toISOString()
     const pace = await paceOf($, await read($, limits), now)
     const snapshot: Snapshot = {
@@ -1269,6 +1279,7 @@ async function heartbeat($: EngineInterface) {
   try {
     // A global setting another session changed reaches this one.
     await loadSettings($)
+    await adoptUsage($)
     const k = await read($, keepWarm)
     const c = await read($, cache)
     const now = await read($, nowMs)
@@ -1290,6 +1301,21 @@ async function heartbeat($: EngineInterface) {
   } catch {
     // Try again at the next tick.
   }
+}
+
+// The usage windows another session reported more recently than this one
+// (its responses carry them, an idle session gets none), and the samples
+// every session adds, taken from the store. The windows are the account's,
+// so the newest figures are right for every session.
+async function adoptUsage($: EngineInterface) {
+  const at = await $.store.get('limitsAt')
+  const saved = await $.store.get('limits')
+  if (typeof at === 'number' && at > (await read($, limitsAt)) && Array.isArray(saved)) {
+    await update($, limits, () => saved as Limit[])
+    await update($, limitsAt, () => at)
+  }
+  const kept = readHistory(await $.store.get('history'))
+  if (JSON.stringify(kept) !== JSON.stringify(await read($, history))) await update($, history, () => kept)
 }
 
 // What /context-bar file answers: where the snapshot is and when it was

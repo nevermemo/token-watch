@@ -9,7 +9,7 @@
 // time between them. The 5-hour and weekly windows are the account's, so the
 // samples are shared by every session through the store.
 
-import type { History, Limit, Sample } from '../types'
+import type { BurnUnit, History, Limit, Sample } from '../types'
 import { MINUTE } from './cache'
 
 const HOUR = 60 * MINUTE
@@ -20,7 +20,7 @@ export const MIN_SPAN_MS = 5 * MINUTE
 
 // How long samples are kept: the longest averaging window the panel offers,
 // plus the newest older sample, which says where that window started.
-export const KEEP_MS = 120 * MINUTE
+export const KEEP_MS = 24 * 60 * MINUTE
 
 // Samples kept: those newer than KEEP_MS, and the newest older one.
 function trim<T extends { at: number }>(samples: T[], now: number): T[] {
@@ -94,11 +94,12 @@ export function fullAt(percent: number, perHour: number | null, now: number, res
   return !Number.isNaN(reset) && at >= reset ? null : at
 }
 
-// A rate as the band prints it: "+12%/h", "+3.2%/h", "+0.20%/min".
-export function rateText(perHour: number, unit: 'h' | 'min') {
+// A rate as the band prints it: "12%/h", "3.2%/h", "0.20%/min", "14%/day".
+export function rateText(perHour: number, unit: BurnUnit) {
   if (unit === 'min') {
     const perMin = perHour / 60
-    return `+${perMin >= 1 ? perMin.toFixed(1) : perMin.toFixed(2)}%/min`
+    return `${perMin >= 1 ? perMin.toFixed(1) : perMin.toFixed(2)}%/min`
   }
-  return `+${perHour >= 10 ? Math.round(perHour) : perHour.toFixed(1)}%/h`
+  const value = unit === 'day' ? perHour * 24 : perHour
+  return `${value >= 10 ? Math.round(value) : value.toFixed(1)}%/${unit}`
 }
