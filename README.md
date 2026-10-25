@@ -282,6 +282,7 @@ Keep-warm is never saved. The snapshot file is described [above](#the-usage-snap
 token-watch/
 ├── .claude-plugin/plugin.json        manifest
 ├── .claude-plugin/marketplace.json   lists this repository as its own marketplace
+├── .claude-plugin/icon.png           the plugin's icon
 ├── hooks/hooks.json                  points Claude Code at register.tsx
 ├── hooks/register.tsx                hooks, readings, keep-warm and saved state
 ├── hooks/band.tsx                    the band: layout, bars, legend, clicks
