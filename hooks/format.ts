@@ -2,7 +2,7 @@
 // spells its figures, so the band, the /token-watch reading and the usage
 // snapshot all say the same thing.
 
-import type { Cap, CacheState, KeepWarm, Limit, Part, Reading, UsagePart } from '../types'
+import type { Cap, CacheState, KeepWarm, Limit, Reading, UsagePart } from '../types'
 import { TTL_MS } from './cache'
 
 // Usage windows by kind, in the order they are shown; any other window the
@@ -33,20 +33,6 @@ export function partOf(limit: Limit): UsagePart {
   return limit.kind === 'five_hour' ? '5H' : limit.kind === 'seven_day' ? 'WK' : 'other'
 }
 
-// The parts in the order the settings panel lists them: each with the name
-// the panel gives it and what it is.
-export const PARTS: [Part, string, string][] = [
-  ['5H', '5H', '5-hour window'],
-  ['WK', 'WK', 'Weekly window'],
-  ['other', 'OTH', 'Other windows (model allowances, spend limit)'],
-  ['CTX', 'CTX', 'Context window'],
-  ['TTL', 'TTL', 'Prompt cache countdown and keep-warm'],
-]
-
-export function isPart(value: unknown): value is Part {
-  return PARTS.some(([part]) => part === value)
-}
-
 export function label(limit: Limit) {
   return WINDOWS[limit.kind] ?? MODELS.find(([pattern]) => pattern.test(limit.kind))?.[1] ?? limit.kind
 }
@@ -71,7 +57,8 @@ export function duration(ms: number) {
 }
 
 export function short(n: number) {
-  if (n >= 1_000_000) return `${+(n / 1_000_000).toFixed(1)}M`
+  // From 999,500 a count rounds to a thousand thousands: "1M", not "1000k".
+  if (n >= 999_500) return `${+(n / 1_000_000).toFixed(1)}M`
   if (n >= 10_000) return `${Math.round(n / 1_000)}k`
   if (n >= 1_000) return `${+(n / 1_000).toFixed(1)}k`
   return String(n)

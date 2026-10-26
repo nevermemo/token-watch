@@ -30,16 +30,20 @@ function trim<T extends { at: number }>(samples: T[], now: number): T[] {
 }
 
 // A reading's windows added to the history: a sample where a window's
-// percentage moved; a window whose percentage fell or whose reset time moved
-// has reset, and starts over. Unchanged, the history comes back as it was.
+// percentage moved; a window whose reset time moved has reset, and starts
+// over. A lower percentage with the same reset time is a reading that
+// arrived out of order (two sessions' responses crossing), and is left out;
+// only a window with no reset time to tell by starts over on one.
+// Unchanged, the history comes back as it was.
 export function addReadings(history: History, limits: Limit[], at: number): History {
   let next = history
   for (const limit of limits) {
     const resetsAt = limit.resetsAt ?? null
     const kept = history[limit.kind]
     const last = kept?.samples[kept.samples.length - 1]
-    const hasReset = !kept || kept.resetsAt !== resetsAt || (last !== undefined && limit.percentUsed < last.percent)
-    if (!hasReset && last !== undefined && last.percent === limit.percentUsed) continue
+    const hasFallen = last !== undefined && limit.percentUsed < last.percent
+    const hasReset = !kept || kept.resetsAt !== resetsAt || (resetsAt === null && hasFallen)
+    if (!hasReset && (hasFallen || last?.percent === limit.percentUsed)) continue
     const sample: Sample = { at, percent: limit.percentUsed }
     const samples = hasReset || !kept ? [sample] : trim([...kept.samples, sample], at)
     next = { ...next, [limit.kind]: { resetsAt, samples } }
@@ -85,10 +89,12 @@ export function ratePerHour(samples: Sample[], now: number, windowMs: number): n
   return Math.max(0, (step.last.percent - step.base.percent) / (step.span / HOUR))
 }
 
-// When a window fills at this pace: null at no pace, already full, or when
-// it would reset first.
+// When a window fills at this pace: now when it is full already; null at no
+// pace, or when it would reset first.
 export function fullAt(percent: number, perHour: number | null, now: number, resetsAt: string | undefined): number | null {
-  if (perHour === null || perHour <= 0 || percent >= 100) return null
+  if (perHour === null) return null
+  if (percent >= 100) return now
+  if (perHour <= 0) return null
   const at = now + ((100 - percent) / perHour) * HOUR
   const reset = resetsAt ? Date.parse(resetsAt) : NaN
   return !Number.isNaN(reset) && at >= reset ? null : at

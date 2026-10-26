@@ -1,7 +1,8 @@
-// The settings, as one tree: what each part of the band shows in each view,
-// each usage window's pace (shown in which views, its averaging window and
-// its unit), and keep-warm's caps by TTL. Every setting is a leaf with a
-// check of its own. The global settings are the whole tree; a session's own
+// The settings, as one tree: what each part of the banner shows in each
+// view, each usage window's pace (shown in which views, its averaging window
+// and its unit), keep-warm's caps, mode and reminder, the alerts, the
+// context's details lines, and TW Monitor's settings. Every setting is a
+// leaf with a check of its own. The global settings are the whole tree; a session's own
 // are a sparse copy of it, holding only the leaves the session set; the
 // settings in force take the session's leaf where there is one, else the
 // global. Pure functions; the hooks module keeps and saves the trees.

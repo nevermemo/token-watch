@@ -16,8 +16,9 @@
 // turn.start / turn.complete (main loop): no ping while a turn runs; when a
 //   response ends the countdown restarts, since its request refreshed the
 //   cache. Neither hook reads the text.
-// prompt.submit: a prompt from the person turns keep-warm off; a background
-//   delivery does not. Only the origin is read, and the prompt passes on.
+// prompt.submit: a prompt from the person turns keep-warm off (in Notify
+//   mode it stays on: a reminder costs nothing); a background delivery does
+//   not. Only the origin is read, and the prompt passes on.
 // session.compact (main loop, not a precompute): keep-warm off, the countdown
 //   restarts.
 // session.end: keep-warm off; where the process goes on under another session
@@ -189,7 +190,7 @@ const sessions = atom({ plugin: 'token-watch', key: 'sessions' } as const, [])
 const sessionsClosed = atom({ plugin: 'token-watch', key: 'sessionsClosed' } as const, [])
 const pinned = atom({ plugin: 'token-watch', key: 'pinned' } as const, {})
 const titles = atom({ plugin: 'token-watch', key: 'titles' } as const, {})
-const clearPresses = atom({ plugin: 'token-watch', key: 'clearPresses' } as const, 0)
+const clearPresses = atom({ plugin: 'token-watch', key: 'clearPresses' } as const, { count: 0, since: 0 })
 const hiddenSessions = atom({ plugin: 'token-watch', key: 'hiddenSessions' } as const, {})
 
 // The context's details lines, as the panel names them.
@@ -265,6 +266,7 @@ type Mark = keyof typeof MARKS
 // first.
 const CLEAR_PRESSES = 10
 const CLEAR_WINDOW_MS = 5_000
+const NO_PRESSES = { count: 0, since: 0 }
 
 // TW Monitor's sections that start closed.
 const CLOSED_FIRST = new Set(['hidden'])
@@ -328,14 +330,20 @@ const SESSIONS_PARTS = ['.claude', 'token-watch', 'sessions']
 // a title (a JSON string, escapes and all) and how long it may take.
 const PROJECTS_PARTS = ['.claude', 'projects']
 const FS_READ_MAX = 4 * 1024 * 1024
-const TITLE_PATTERN = '"customTitle":"(\\\\.|[^"])*"'
+const TITLE_PATTERN = '"type":"custom-title","customTitle":"(\\\\.|[^"])*"'
 const GREP_TIMEOUT_MS = 10_000
+// How soon a session whose transcript was not found is looked for again.
+const TITLE_RETRY_MS = 2 * 60_000
 const SLOT_NAME = /^session-(\d+)\.json$/
 const HEARTBEAT_MS = 30_000
 const SNAPSHOT_FRESH_MS = 120_000
 
 // A session's end after which the process goes on under another session.
 const CONTINUES = new Set<string>(['clear', 'resume', 'logout'])
+
+// How often a session's own settings are saved again, so a session open for
+// weeks is never pruned.
+const TOUCH_EVERY_MS = 24 * 60 * 60_000
 
 // The least a ping waits once armed.
 const MIN_PING_WAIT_MS = 1_000
@@ -356,6 +364,14 @@ let slotPath: string | null = null
 let slotId: string | null = null
 let lastSlotMs = 0
 let lastSlotKey = ''
+// Whether a person is at the prompt (a `claude -p` or SDK run writes no
+// files), whether this session has ended (its file says so, and stays so),
+// when its own settings were last saved again, and when a session's
+// transcript was last looked for and not found.
+let isInteractive = true
+let hasEnded = false
+let lastTouchMs = 0
+const titleMisses = new Map<string, number>()
 let pingTimer: Timer | null = null
 let notifyTimer: Timer | null = null
 let pingOut: { seq: number; sentAt: number } | null = null
@@ -367,6 +383,11 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     const result = await next(e)
+    isInteractive = e.isInteractive
+    hasEnded = false
+    // The clock first, so a step below that fails cannot leave the session
+    // without its countdowns, its file and its settings' updates.
+    $.clock.every(HEARTBEAT_MS, () => void tick($).then(() => heartbeat($)).catch(() => {}))
     await $.command.register({
       name: 'token-watch',
       description:
@@ -380,6 +401,7 @@ export const register: Register = (on, options) => {
     await tick($)
     await pruneSessionSettings($)
     await loadSettings($, true)
+    lastTouchMs = await $.clock.now()
     await setMarks($, 'pinned', readMarks(await $.store.get(MARKS.pinned)))
     await setMarks($, 'hidden', readMarks(await $.store.get(MARKS.hidden)))
     await setTitles($, readTitleStore(await $.store.get('titles')))
@@ -388,23 +410,19 @@ export const register: Register = (on, options) => {
     // A new session has no usage windows until its first response, so start
     // from the last ones seen; any whose reset time has passed is drawn at 0%,
     // and the first response replaces them.
-    const saved = await $.store.get('limits')
-    if (Array.isArray(saved)) {
-      await update($, limits, () => saved as Limit[])
+    const saved = readLimits(await $.store.get('limits'))
+    if (saved !== null) {
+      await update($, limits, () => saved)
       const savedAt = await $.store.get('limitsAt')
       if (typeof savedAt === 'number') await update($, limitsAt, () => savedAt)
     }
-    if (snapshotOn) {
-      snapshotPath = await homePath($, SNAPSHOT_PARTS)
-      sessionsDir = await homePath($, SESSIONS_PARTS)
-    }
+    await resolvePaths($)
     const inputs = await readTtlInputs($)
     await update($, ttlInputs, () => inputs)
     await settleTtl($)
     // A start's reading counts as fresh only while no session has stamped
     // one (a new store, or 1.3.0's): it never puts older figures over newer.
     await takeReading($, (await read($, limitsAt)) === 0)
-    $.clock.every(HEARTBEAT_MS, () => void tick($).then(() => heartbeat($)).catch(() => {}))
     // The ping timer is a module variable a hot reload drops, while
     // keep-warm's state lives in $.state: arm it again. Unless the TTL row is
     // now hidden (another session, sharing the store, hid it): then off.
@@ -438,6 +456,9 @@ export const register: Register = (on, options) => {
     // turn.complete is not followed either.
     if (e.agentId) return result
     stopPingTimer()
+    // A turn refreshes the cache: no reminder while it runs; its end arms
+    // the next.
+    stopNotifyTimer()
     await update($, working, () => true)
     return result
   })
@@ -498,13 +519,18 @@ export const register: Register = (on, options) => {
         confirmed: false,
       }))
       await settleTtl($)
-      // Another session's id: its own settings, if it has any.
+      // Another session's id: its own settings, if it has any; and its
+      // context, so the banner and the files stop showing the last one's.
       await loadSettings($, true)
+      await takeReading($)
+    } else {
+      // The session is over (the process goes on only under another one,
+      // which keeps the slot): its file says so first, within the hook's
+      // budget, and stays so; the slot is free for the next.
+      await writeSessionFile($, true, true)
+      hasEnded = true
     }
     await writeSnapshot($)
-    // The session is over (the process goes on only under another one, which
-    // keeps the slot): its file says so, and the slot is free for the next.
-    if (!CONTINUES.has(e.reason)) await writeSessionFile($, true, true)
     return result
   })
 
@@ -609,7 +635,8 @@ export const register: Register = (on, options) => {
     const isGlobal = await editsGlobal($)
     const isMonitor = (await read($, scope)) === 'monitor'
     const hasSession = (await sessionKey($)) !== null
-    const presses = await read($, clearPresses)
+    const pressed = await read($, clearPresses)
+    const presses = (await read($, nowMs)) - pressed.since < CLEAR_WINDOW_MS ? pressed.count : 0
     const pinsNow = await read($, pinned)
     const hiddenNow = await read($, hiddenSessions)
     const own = await read($, override)
@@ -903,7 +930,7 @@ export const register: Register = (on, options) => {
           </Button>
         </Box>
         <Text dimColor wrap="wrap">
-          {`Press ${CLEAR_PRESSES} times within ${CLEAR_WINDOW_MS / 1000} s to delete everything Token Watch has stored: settings, pins, hidden sessions, titles and usage history.`}
+          {`Press ${CLEAR_PRESSES} times within ${CLEAR_WINDOW_MS / 1000} s to delete everything Token Watch has stored: settings, pins, hidden sessions, titles and usage history. Its files in ~/.claude/token-watch stay; Usage snapshot files in /config turns them off.`}
         </Text>
       </Box>
     )
@@ -1039,11 +1066,12 @@ export const register: Register = (on, options) => {
     )
   })
 
-  // TW Monitor: the usage windows on top, then every live session on
-  // this device (its file written in the last two minutes, and not ended),
-  // this one first with its own figures as they stand, each with its folder,
-  // its context and its prompt cache's countdown. The others' files are read when the panel opens and
-  // every 30 s while it is open.
+  // TW Monitor: the usage windows on top, then every live session on this
+  // device (its file written in the last two minutes, and not ended), this
+  // one with its own figures as they stand (first, by the Current session
+  // setting), each with its name, its context and its prompt cache's
+  // countdown, as the Monitor settings pick. The others' files are read when
+  // the panel opens, every 30 s while it is open, and on its refresh.
   on('ui.render', { component: 'Pane', requestId: SESSIONS }, async ($, e) => {
     const { Box, Button, Text } = $.ui.resolve(e)
     const isTerminal = e.surface === 'terminal'
@@ -1777,9 +1805,7 @@ async function sessionKey($: EngineInterface) {
 // then. `touch` (a session's start) applies them whatever, and saves this
 // session's own again to keep them from being pruned.
 async function loadSettings($: EngineInterface, touch = false) {
-  const saved = await $.store.get('settings')
-  const nextGlobal =
-    saved === undefined ? fromLegacy(await $.store.get('hidden'), await $.store.get('caps')) : readSettings(saved)
+  const nextGlobal = await storedGlobal($)
   const key = await sessionKey($)
   const kept = key === null ? undefined : ((await $.store.get(key)) as { settings?: unknown } | undefined)
   const nextOwn = readOverride(kept?.settings)
@@ -1797,13 +1823,27 @@ async function loadSettings($: EngineInterface, touch = false) {
   if (isChanged || touch) await applySettings($)
 }
 
+// The global settings as the store holds them now (1.3.0's keys read into
+// a tree where none is saved yet). A change is made over these, not over
+// this session's copy, which can be a heartbeat old: so it never puts back
+// what another session changed meanwhile.
+async function storedGlobal($: EngineInterface) {
+  const saved = await $.store.get('settings')
+  return saved === undefined ? fromLegacy(await $.store.get('hidden'), await $.store.get('caps')) : readSettings(saved)
+}
+
 // The settings in force, the session's leaves over the global ones; then
-// keep-warm held to them: off while no view shows the cache, stopped if past
-// its caps.
+// keep-warm held to them: off while no view shows the cache, stopped when
+// its mode changed under it, stopped if past its caps.
 async function applySettings($: EngineInterface) {
+  const before = await read($, settings)
   const next = merge(await read($, globalSettings), await read($, override))
-  if (JSON.stringify(await read($, settings)) !== JSON.stringify(next)) await update($, settings, () => next)
+  if (JSON.stringify(before) !== JSON.stringify(next)) await update($, settings, () => next)
   if (isCacheHidden(next) && (await read($, keepWarm)).on) await stopKeepWarm($, null)
+  // Keep-warm runs in the mode it was turned on in: a reminder left on for
+  // hours never turns into pings because the mode changed, here or in
+  // another session.
+  if (before.warm.mode !== next.warm.mode && (await read($, keepWarm)).on) await stopKeepWarm($, 'stopped: mode changed')
   await holdToCaps($)
   // A mode or a lead that changed arms the timers again.
   if ((await read($, keepWarm)).on) await schedule($)
@@ -1874,15 +1914,20 @@ async function clearMarks($: EngineInterface, mark: Mark) {
 // "Clear all data" pressed: one more press counted, the count starting
 // over CLEAR_WINDOW_MS after the first; the last of CLEAR_PRESSES clears.
 async function pressClear($: EngineInterface) {
-  const count = (await read($, clearPresses)) + 1
-  if (count >= CLEAR_PRESSES) return clearAll($)
-  if (count === 1) $.clock.after(CLEAR_WINDOW_MS, () => void update($, clearPresses, () => 0).catch(() => {}))
-  await update($, clearPresses, () => count)
+  const now = await $.clock.now()
+  const was = await read($, clearPresses)
+  // Counted from the first press's time, which a reload keeps (its timer it
+  // does not), so presses spread out never add up to a clear.
+  const isOn = now - was.since < CLEAR_WINDOW_MS
+  const next = { count: isOn ? was.count + 1 : 1, since: isOn ? was.since : now }
+  if (next.count >= CLEAR_PRESSES) return clearAll($)
+  if (next.count === 1) $.clock.after(CLEAR_WINDOW_MS, () => void update($, clearPresses, () => NO_PRESSES).catch(() => {}))
+  await update($, clearPresses, () => next)
 }
 
 // TW Monitor's settings back to the defaults, for every session.
 async function resetMonitor($: EngineInterface) {
-  const next = setAt(await read($, globalSettings), ['monitor'], DEFAULT_SETTINGS.monitor)
+  const next = setAt(await storedGlobal($), ['monitor'], DEFAULT_SETTINGS.monitor)
   await update($, globalSettings, () => next)
   await $.store.set('settings', next)
   await applySettings($)
@@ -1895,7 +1940,7 @@ async function resetMonitor($: EngineInterface) {
 // sessions' files stay (nothing can delete them) and go stale on their own.
 async function clearAll($: EngineInterface) {
   for (const key of await $.store.keys()) await $.store.delete(key)
-  await update($, clearPresses, () => 0)
+  await update($, clearPresses, () => NO_PRESSES)
   await setMarks($, 'pinned', {})
   await setMarks($, 'hidden', {})
   await setTitles($, {})
@@ -1912,8 +1957,6 @@ function readMarks(value: unknown): Record<string, number> {
   return Object.fromEntries(Object.entries(value).filter(([, at]) => typeof at === 'number')) as Record<string, number>
 }
 
-// TW Monitor's section that opens or closes: open at first, save the ones in
-// CLOSED_FIRST, for which the list holds the ones opened.
 // TW Monitor's refresh: this session's figures and the other sessions' files
 // read again now. Titles are not: they are read when a session is listed.
 async function refreshMonitor($: EngineInterface) {
@@ -1921,6 +1964,8 @@ async function refreshMonitor($: EngineInterface) {
   await readSessions($)
 }
 
+// TW Monitor's section that opens or closes: open at first, save the ones in
+// CLOSED_FIRST, for which the list holds the ones opened.
 async function toggleFold($: EngineInterface, id: string) {
   await update($, sessionsClosed, closed => (closed.includes(id) ? closed.filter(s => s !== id) : [...closed, id]))
 }
@@ -1933,7 +1978,7 @@ async function toggleSection($: EngineInterface, id: string) {
 // leaf only they hold. In this session's scope, a leaf set to the global
 // value no longer overrides it.
 async function setSetting($: EngineInterface, path: Path, value: unknown) {
-  const global = await read($, globalSettings)
+  const global = await storedGlobal($)
   if (isGlobalOnly(path) || (await editsGlobal($))) {
     const next = setAt(global, path, value)
     await update($, globalSettings, () => next)
@@ -1963,7 +2008,7 @@ async function resetSetting($: EngineInterface, path: Path) {
 async function resetDefaults($: EngineInterface) {
   if (!(await editsGlobal($))) return
   // TW Monitor's settings are the Monitor view's to reset.
-  const next = { ...DEFAULT_SETTINGS, monitor: (await read($, globalSettings)).monitor }
+  const next = { ...DEFAULT_SETTINGS, monitor: (await storedGlobal($)).monitor }
   await update($, globalSettings, () => next)
   await $.store.set('settings', next)
   await applySettings($)
@@ -1981,8 +2026,12 @@ async function paceOf($: EngineInterface, windows: Limit[], now: number): Promis
   const h = await read($, history)
   const pace: Pace = { windows: {} }
   for (const w of windows) {
+    // A window whose reset time has passed has started over: its samples are
+    // the last period's, and say nothing until a reading starts the new one.
+    const kept = h[w.kind]
+    if (kept?.resetsAt && Date.parse(kept.resetsAt) <= now) continue
     const { windowMin, unit } = inForce.pace[partOf(w)]
-    const perHour = ratePerHour(h[w.kind]?.samples ?? [], now, windowMin * 60_000)
+    const perHour = ratePerHour(kept?.samples ?? [], now, windowMin * 60_000)
     if (perHour !== null) pace.windows[w.kind] = { perHour, fullAt: fullAt(w.percentUsed, perHour, now, w.resetsAt), unit }
   }
   return pace
@@ -2192,7 +2241,9 @@ async function ping($: EngineInterface) {
       if (isCold) {
         // The cache was already cold: the ping paid to re-cache the prefix,
         // and the next one would too. Stop, and show the cache as cold.
-        await update($, cache, cc => ({ ...cc, warmUntil: sentAt }))
+        // A response during the ping (a background turn) has rebased the
+        // countdown since: that one stands.
+        await update($, cache, cc => (cc.lastResponseAt !== null && cc.lastResponseAt > sentAt ? cc : { ...cc, warmUntil: sentAt }))
         await stopKeepWarm($, 'stopped: cache was cold')
       } else {
         // The first ping since the response, more than five minutes after it,
@@ -2239,6 +2290,20 @@ async function pingFailed($: EngineInterface, why: string, now: number) {
   }
   stopPingTimer()
   pingTimer = $.clock.after(RETRY_MS, () => void ping($))
+}
+
+// Where the snapshot and the sessions' files go: nowhere with the snapshot
+// option off, nor in a run nobody is at the prompt for (`claude -p`, the
+// SDK), which would take usage.json over and fill TW Monitor. Worked out
+// again each tick, so an option changed mid-session is followed.
+async function resolvePaths($: EngineInterface) {
+  if (!snapshotOn || !isInteractive) {
+    snapshotPath = null
+    sessionsDir = null
+    return
+  }
+  snapshotPath ??= await homePath($, SNAPSHOT_PARTS)
+  sessionsDir ??= await homePath($, SESSIONS_PARTS)
 }
 
 // A path under the home directory, such as the snapshot's,
@@ -2319,9 +2384,17 @@ async function readTitles($: EngineInterface, list: SessionSnapshot[], force = f
     let next = saved
     for (const s of list) {
       const id = s.session.id
-      if (id === null || (!force && id in saved)) continue
+      if (id === null || (!force && (id in saved || now - (titleMisses.get(id) ?? -Infinity) < TITLE_RETRY_MS))) continue
+      // No transcript yet (a session listed before its first prompt): none
+      // stored, and looked for again when the session is next listed, at
+      // most every TITLE_RETRY_MS.
       const path = await findTranscript($, id, [s.session.root, s.session.cwd])
-      const title = path === null ? null : await transcriptTitle($, path)
+      if (path === null) {
+        titleMisses.set(id, now)
+        continue
+      }
+      titleMisses.delete(id)
+      const title = await transcriptTitle($, path)
       next = { ...next, [id]: { title, at: now } }
     }
     if (next !== saved) await $.store.set('titles', next)
@@ -2334,6 +2407,8 @@ async function readTitles($: EngineInterface, list: SessionSnapshot[], force = f
 // Every listed session's title read again: the Title or Folder / title
 // button pressed.
 async function rereadTitles($: EngineInterface) {
+  // The other sessions read first: TW Monitor may not have been open.
+  await readSessions($, false)
   const own = await sessionSnapshotOf($, await $.clock.now(), null)
   await readTitles($, [own, ...(await read($, sessions))], true)
 }
@@ -2346,7 +2421,8 @@ async function rereadTitles($: EngineInterface) {
 // directory it runs in.
 async function transcriptTitle($: EngineInterface, path: string) {
   const stat = await $.fs.stat(path).catch(() => null)
-  if (stat !== null && stat.size <= FS_READ_MAX) return titleIn(await $.fs.read(path).catch(() => ''))
+  if (stat === null) return null
+  if (stat.size <= FS_READ_MAX) return titleIn(await $.fs.read(path).catch(() => ''))
   const cut = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
   const found = await $.process
     .run(['git', 'grep', '--no-index', '--no-color', '-h', '-o', '-E', '-e', TITLE_PATTERN, '--', path.slice(cut + 1)], {
@@ -2355,7 +2431,7 @@ async function transcriptTitle($: EngineInterface, path: string) {
     })
     .catch(() => null)
   if (found === null || found.exitCode !== 0) return null
-  return titleIn(found.stdout.trim().split('\n').at(-1)?.replace(/^"customTitle"/, '"type":"custom-title","customTitle"') ?? '')
+  return titleIn(found.stdout.trim().split('\n').at(-1) ?? '')
 }
 
 // The last title in a transcript's text, or null.
@@ -2390,7 +2466,9 @@ async function setTitles($: EngineInterface, saved: Record<string, { title: stri
 // tried for the session's root and its directory, else looked for in every
 // project's folder. Null where none has it.
 async function findTranscript($: EngineInterface, id: string, dirs: (string | null | undefined)[]) {
-  const projects = await homePath($, PROJECTS_PARTS)
+  // Under CLAUDE_CONFIG_DIR where it is set, as Claude Code keeps them.
+  const config = await $.env.get('CLAUDE_CONFIG_DIR').catch(() => undefined)
+  const projects = config ? joinPath(config.replace(/[\\/]+$/, ''), 'projects') : await homePath($, PROJECTS_PARTS)
   if (projects === null) return null
   const has = (path: string) => $.fs.exists(path).catch(() => false)
   const folders = dirs.filter((p): p is string => typeof p === 'string').map(p => p.replace(/[^a-zA-Z0-9]/g, '-'))
@@ -2411,16 +2489,28 @@ async function findTranscript($: EngineInterface, id: string, dirs: (string | nu
 function readSessionSnapshot(text: string): SessionSnapshot | null {
   try {
     const s = JSON.parse(text) as SessionSnapshot
+    const isText = (v: unknown) => v === null || v === undefined || typeof v === 'string'
+    const c = s?.context
     const isSession =
       s?.schema === 1 &&
       typeof s.writtenAt === 'string' &&
+      isText(s.endedAt) &&
+      isText(s.lastActiveAt) &&
       typeof s.session === 'object' &&
       s.session !== null &&
+      isText(s.session.id) &&
+      isText(s.session.cwd) &&
+      isText(s.session.root) &&
+      typeof s.isWorking === 'boolean' &&
+      (c === null || (typeof c?.total === 'number' && typeof c.window === 'number' && typeof c.percent === 'number')) &&
       typeof s.cache === 'object' &&
       s.cache !== null &&
       isTtl(s.cache.ttl) &&
-      WARM_MODES.includes(s.cache.keepWarm?.mode)
-    return isSession ? s : null
+      isText(s.cache.expiresAt) &&
+      typeof s.cache.keepWarm?.on === 'boolean' &&
+      WARM_MODES.includes(s.cache.keepWarm.mode)
+    // A file from before 1.4.0's fields reads as having none.
+    return isSession ? { ...s, endedAt: s.endedAt ?? null, lastActiveAt: s.lastActiveAt ?? null } : null
   } catch {
     return null
   }
@@ -2465,7 +2555,7 @@ async function claimSlot($: EngineInterface, now: number) {
 // sessions starting together may pick the same one, and the one written over
 // moves on), or `isEnded` (the session ended).
 async function writeSessionFile($: EngineInterface, force = false, isEnded = false) {
-  if (sessionsDir === null) return
+  if (sessionsDir === null || (hasEnded && !isEnded)) return
   try {
     const now = await $.clock.now()
     const file = await sessionSnapshotOf($, now, isEnded ? new Date(now).toISOString() : null)
@@ -2490,7 +2580,7 @@ async function writeSessionFile($: EngineInterface, force = false, isEnded = fal
 // The other live sessions, read from their files for TW Monitor:
 // written in the last SNAPSHOT_FRESH_MS and not ended, by folder; and the
 // pins, hidden sessions and titles.
-async function readSessions($: EngineInterface) {
+async function readSessions($: EngineInterface, withTitles = true) {
   try {
     const id = await $.session.id().catch(() => null)
     const now = await $.clock.now()
@@ -2502,7 +2592,7 @@ async function readSessions($: EngineInterface) {
     if (JSON.stringify(live) !== JSON.stringify(await read($, sessions))) await update($, sessions, () => live)
     // A session just listed has its title read, while the Name setting uses
     // titles.
-    await readTitles($, [await sessionSnapshotOf($, now, null), ...live])
+    if (withTitles) await readTitles($, [await sessionSnapshotOf($, now, null), ...live])
     // The marks another session set reach this one, and the titles. A mark
     // or a title is dropped once it is SESSION_SETTINGS_KEEP_MS old and its
     // session is not running.
@@ -2604,8 +2694,14 @@ async function writeSnapshot($: EngineInterface, force = false) {
 // TW Monitor is open the others' files are read again.
 async function heartbeat($: EngineInterface) {
   try {
-    // A global setting another session changed reaches this one.
-    await loadSettings($)
+    await resolvePaths($)
+    // A global setting another session changed reaches this one; once a
+    // day this session's own are saved again, so a session left open for
+    // weeks is never pruned as gone.
+    const at = await $.clock.now()
+    const isDue = at - lastTouchMs >= TOUCH_EVERY_MS
+    if (isDue) lastTouchMs = at
+    await loadSettings($, isDue)
     await adoptUsage($)
     const k = await read($, keepWarm)
     const c = await read($, cache)
@@ -2649,7 +2745,7 @@ async function checkAlerts($: EngineInterface) {
       const level = inForce.alert[part]
       return level === null ? [] : [level]
     }
-    const alerted = ((await $.store.get('alerted')) ?? {}) as Record<string, { resetsAt: string | null; levels: number[] }>
+    const alerted = readAlerted(await $.store.get('alerted'))
     let next = alerted
     for (const w of current(await read($, limits), now)) {
       const resetsAt = w.resetsAt ?? null
@@ -2686,13 +2782,37 @@ async function notify($: EngineInterface, text: string) {
 async function adoptUsage($: EngineInterface) {
   const at = await $.store.get('limitsAt')
   const saved = await $.store.get('limits')
-  if (typeof at === 'number' && at > (await read($, limitsAt)) && Array.isArray(saved)) {
-    await update($, limits, () => saved as Limit[])
+  const windows = readLimits(saved)
+  if (typeof at === 'number' && at > (await read($, limitsAt)) && windows !== null) {
+    await update($, limits, () => windows)
     await update($, limitsAt, () => at)
     await checkAlerts($)
   }
   const kept = readHistory(await $.store.get('history'))
   if (JSON.stringify(kept) !== JSON.stringify(await read($, history))) await update($, history, () => kept)
+}
+
+// Usage windows as the store keeps them, each checked; null for anything
+// else.
+function readLimits(value: unknown): Limit[] | null {
+  if (!Array.isArray(value)) return null
+  return value.filter(
+    (w): w is Limit =>
+      typeof w?.kind === 'string' &&
+      typeof w.percentUsed === 'number' &&
+      (w.resetsAt === undefined || typeof w.resetsAt === 'string'),
+  )
+}
+
+// The alerts already given, by window, as the store keeps them, each checked.
+function readAlerted(value: unknown): Record<string, { resetsAt: string | null; levels: number[] }> {
+  if (typeof value !== 'object' || value === null) return {}
+  return Object.fromEntries(
+    Object.entries(value).filter(([, entry]) => {
+      const e = entry as { resetsAt?: unknown; levels?: unknown } | null
+      return (e?.resetsAt === null || typeof e?.resetsAt === 'string') && Array.isArray(e?.levels) && e.levels.every(l => typeof l === 'number')
+    }),
+  ) as Record<string, { resetsAt: string | null; levels: number[] }>
 }
 
 // What /token-watch file answers: where the snapshot is and when it was

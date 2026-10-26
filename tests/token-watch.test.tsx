@@ -172,6 +172,8 @@ type Boot = {
   cwd?: string
   // False: there is no git to search a large transcript with.
   git?: false
+  // False: nobody is at the prompt (a `claude -p` or SDK run).
+  interactive?: false
   // Files already in the sessions folder (other sessions'), by name: each
   // one's content (an object is written as JSON) and its mtime.
   sessionFiles?: Record<string, { file: unknown; mtimeMs: number }>
@@ -291,7 +293,7 @@ async function boot($: Engine, on: On, surface: 'terminal' | 'desktop' | null, r
   on('process.run', ($, e) => {
     if (options.git === false || e.argv[0] !== 'git') return { deny: 'ENOENT: git' }
     const file = files.get(`${slash(e.init?.cwd ?? '')}/${e.argv[e.argv.length - 1]}`)
-    const found = (file?.text ?? '').match(/"customTitle":"(\\.|[^"])*"/g) ?? []
+    const found = (file?.text ?? '').match(/"type":"custom-title","customTitle":"(\\.|[^"])*"/g) ?? []
     runs.push(e.argv)
     const stdout = found.map(f => `${f}\n`).join('')
     return { value: { exitCode: found.length > 0 ? 0 : 1, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
@@ -319,17 +321,22 @@ async function boot($: Engine, on: On, surface: 'terminal' | 'desktop' | null, r
     }
     return { value: undefined }
   })
-  on('fs.list', ($, e) => ({
-    value: [...files]
-      .filter(([path]) => path.slice(0, path.lastIndexOf('/')) === slash(e.path))
-      .map(([path, f]) => ({ name: path.slice(path.lastIndexOf('/') + 1), kind: 'file', size: f.text.length, mtimeMs: f.mtimeMs, isLink: false })),
-  }))
+  // A folder's files, and its folders (each that holds a file further down).
+  on('fs.list', ($, e) => {
+    const dir = `${slash(e.path)}/`
+    const under = [...files].filter(([path]) => path.startsWith(dir))
+    const fileEntries = under
+      .filter(([path]) => !path.slice(dir.length).includes('/'))
+      .map(([path, f]) => ({ name: path.slice(dir.length), kind: 'file' as const, size: f.text.length, mtimeMs: f.mtimeMs, isLink: false }))
+    const folders = [...new Set(under.map(([path]) => path.slice(dir.length)).filter(rest => rest.includes('/')).map(rest => rest.split('/')[0]!))]
+    return { value: [...fileEntries, ...folders.map(name => ({ name, kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false }))] }
+  })
   on('fs.read', ($, e) => {
     const f = files.get(slash(e.path))
     return f === undefined ? { deny: 'ENOENT' } : { value: f.text }
   })
   on('fs.exists', ($, e) => ({ value: files.has(slash(e.path)) }))
-  await $.session.start({ cwd: '.', surface, isInteractive: true })
+  await $.session.start({ cwd: '.', surface, isInteractive: options.interactive ?? true })
 
   return { writes, saved, clock, forks, opens, closes, notes, sessionWrites, files, runs }
 }
@@ -549,9 +556,11 @@ describe('context bar', () => {
       expect(order.every(i => i >= 0)).toBe(true)
       expect([...order].sort((a, b) => a - b)).toEqual(order)
       expect(collapsed).toContain('{"type":"Text","props":{"wrap":"truncate","color":"#e06c6c"},"children":["88%"]}')
-      // Four windows' meters would leave the context bar under 20 cells at 116
-      // columns, so the meters go first and the detail stays; wider, they return.
+      // At 116 columns four windows' 10-cell meters would leave the context
+      // bar too little room: they narrow to 6 cells and the detail stays;
+      // wider, they return at 10.
       expect(collapsed).not.toContain('"width":10,"height":1')
+      expect(count(collapsed, '"width":6,"height":1,"flexDirection":"row","alignItems":"center","flexShrink":0')).toBe(4)
       await ui.resize({ columns: 150, rows: 8, in: 'band' })
       const wide = await band()
       expect(count(wide, '"width":10,"height":1,"flexDirection":"row","alignItems":"center","flexShrink":0')).toBe(4)
@@ -1834,7 +1843,7 @@ describe('burn rate', () => {
       fiveHourAt(limits, 67.4)
       await $.session.measure(MEASURE)
       // 5 points in 10 minutes: 30 an hour; the 32.6 left fill in 65 minutes,
-      // before the reset at 2h 14m. WK is flat: no pace, and Safe.
+      // before the reset at 2h 14m. WK is flat: 0.0%/h, and Safe.
       const expanded = await band()
       expect(expanded).toContain('"30%/h"')
       expect(expanded).toContain('"color":"#e06c6c"},"children":["1h 05m"]')
@@ -1924,9 +1933,83 @@ describe('burn rate', () => {
     fiveHourAt(limits, 67.4)
     await $.session.measure(MEASURE)
     expect(await band()).toContain('"30%/h"')
-    limits[1] = { kind: 'five_hour', percentUsed: 2, resetsAt: new Date(NOW + 5 * 60 * MINUTE).toISOString() }
+    const resetsAt = new Date(NOW + 5 * 60 * MINUTE).toISOString()
+    limits[1] = { kind: 'five_hour', percentUsed: 2, resetsAt }
     await $.session.measure(MEASURE)
     expect(await band()).not.toContain('"30%/h"')
+    // The new period's pace, from its own samples: 5 points in 10 minutes
+    // (the last period's would put its start at 62.4%, and read 0).
+    await clock.advance(10 * MINUTE)
+    limits[1] = { kind: 'five_hour', percentUsed: 7, resetsAt }
+    await $.session.measure(MEASURE)
+    expect(await band()).toContain('"30%/h"')
+  })
+
+  test('a window full already reads Full in red, never Safe', async ($, on) => {
+    const limits = [...RATE_LIMITS]
+    const { band, clock } = await start($, on, 'terminal', limits)
+    await clock.advance(10 * MINUTE)
+    fiveHourAt(limits, 100)
+    await $.session.measure(MEASURE)
+    expect(await band()).toContain('"color":"#e06c6c"},"children":["Full"]')
+  })
+
+  test("once a window's reset time passes, its last period's pace goes, until a reading starts the new one", async ($, on) => {
+    const limits = [...RATE_LIMITS]
+    const { band, clock } = await start($, on, 'terminal', limits)
+    await clock.advance(10 * MINUTE)
+    fiveHourAt(limits, 67.4)
+    await $.session.measure(MEASURE)
+    expect(await band()).toContain('"30%/h"')
+    // Past 5H's reset at 2h 14m, with no reading since: 0%, and no pace for
+    // it (WK's flat one stays).
+    await clock.advance(2 * 60 * MINUTE + 5 * MINUTE)
+    const after = await band()
+    expect(count(after, '%/h"')).toBe(1)
+    expect(after).toContain('"0.0%/h"')
+  })
+
+  test('a lower reading with the same reset time arrived out of order: left out, the pace kept', async ($, on) => {
+    const limits = [...RATE_LIMITS]
+    const { band, clock, saved } = await start($, on, 'terminal', limits)
+    await clock.advance(10 * MINUTE)
+    fiveHourAt(limits, 67.4)
+    await $.session.measure(MEASURE)
+    fiveHourAt(limits, 67.3)
+    await $.session.measure(MEASURE)
+    expect(await band()).toContain('"30%/h"')
+    expect((saved.get('history') as Record<string, { samples: unknown[] }>).five_hour!.samples.length).toBe(2)
+  })
+
+  test('%/day: a weekly window by the day', async ($, on) => {
+    const limits = [...RATE_LIMITS]
+    const { band, clock } = await start($, on, 'terminal', limits, undefined, { settings: { warm: { mode: 'pings' }, pace: { WK: { unit: 'day' } } } })
+    await clock.advance(10 * MINUTE)
+    limits[0] = { ...SEVEN_DAY, percentUsed: 32 }
+    await $.session.measure(MEASURE)
+    // 1 point in 10 minutes: 6 an hour, 144 a day.
+    expect(await band()).toContain('"144%/day"')
+  })
+
+  test('the collapsed line shows a forecast only with its pace, never the forecast alone', async ($, on) => {
+    const limits = [...RATE_LIMITS]
+    const { ui, band, clock } = await start($, on, 'terminal', limits, undefined, {
+      settings: {
+        warm: { mode: 'pings' },
+        pace: { '5H': { show: { bars: true }, forecast: { bars: true } }, WK: { show: { bars: true }, forecast: { bars: true } } },
+      },
+    })
+    await clock.advance(10 * MINUTE)
+    fiveHourAt(limits, 67.4)
+    await $.session.measure(MEASURE)
+    await ui.pointer(rightClick)
+    // The paces ("30%/h", "0.0%/h") take more cells than the forecasts
+    // ("1h 05m", "Safe"): at some width the forecasts alone would fit.
+    for (let columns = 56; columns <= 100; columns++) {
+      await ui.resize({ columns, rows: 8, in: 'band' })
+      const line = await band()
+      if (line.includes('"1h 05m"')) expect(line).toContain('"30%/h"')
+    }
   })
 
   test("the samples are the account's: a new session reads the pace at once from the store", async ($, on) => {
@@ -2373,11 +2456,15 @@ describe('TW Monitor', () => {
   })
 
   test('a session that ends says so in its file; a /clear goes on under the new id', async ($, on) => {
-    const { sessionWrites } = await boot($, on, 'terminal', RATE_LIMITS)
+    const { sessionWrites, clock } = await boot($, on, 'terminal', RATE_LIMITS)
     await $.session.end({ reason: 'clear', sessionId: 'sess-1', resume: { id: 'sess-1' } })
     expect(lastFile(sessionWrites).file.endedAt).toBeNull()
     await $.session.end({ reason: 'prompt_input_exit', sessionId: 'sess-1', resume: { id: 'sess-1' } })
     expect(lastFile(sessionWrites).file.endedAt).toBe('2026-10-03T12:00:00.000Z')
+    // And stays so: nothing writes it live again.
+    const count = sessionWrites.length
+    await clock.advance(30_000)
+    expect(sessionWrites.length).toBe(count)
   })
 
   test('the snapshot option turns the session files off too', { options: { snapshot: false } }, async ($, on) => {
@@ -2765,8 +2852,10 @@ const transcript = (title: string, id: string) =>
 const monitorSettings = (monitor: Record<string, unknown>) => ({ settings: { warm: { mode: 'pings' }, monitor } })
 
 // The order of sessions' headings in a drawing, by the names given.
-const orderIn = (drawn: string, names: string[]) =>
-  [...names].sort((a, b) => drawn.indexOf(`"label":"[▾] ${a}"`) - drawn.indexOf(`"label":"[▾] ${b}"`))
+const orderIn = (drawn: string, names: string[]) => {
+  for (const name of names) if (!drawn.includes(`"label":"[▾] ${name}"`)) throw new Error(`${name} is not drawn`)
+  return [...names].sort((a, b) => drawn.indexOf(`"label":"[▾] ${a}"`) - drawn.indexOf(`"label":"[▾] ${b}"`))
+}
 
 describe('TW Monitor settings', () => {
   test("the Monitor view: TW Monitor's settings alone, the same for every session", async ($, on) => {
@@ -2926,7 +3015,7 @@ describe('TW Monitor settings', () => {
     expect(d).toContain('"label":"[▾] Quoted \\"name\\""')
     expect(d).toContain('"label":"[▾] Small one"')
     // git for the large one alone, run from its folder with the file's name.
-    expect(runs).toEqual([['git', 'grep', '--no-index', '--no-color', '-h', '-o', '-E', '-e', '"customTitle":"(\\\\.|[^"])*"', '--', 'aa.jsonl']])
+    expect(runs).toEqual([['git', 'grep', '--no-index', '--no-color', '-h', '-o', '-E', '-e', '"type":"custom-title","customTitle":"(\\\\.|[^"])*"', '--', 'aa.jsonl']])
   })
 
   test('with no git, a large transcript leaves its session named by its folder', async ($, on) => {
@@ -3046,6 +3135,126 @@ describe('TW Monitor settings', () => {
     expect(saved.get('settings')).toMatchObject({ monitor: { sort: 'name' } })
   })
 
+  test("a global change goes over the store's settings, not this session's copy: another session's change since stands", async ($, on) => {
+    const { saved } = await start($, on, 'terminal', RATE_LIMITS)
+    // Another session switches keep-warm to Both, after this one last read.
+    saved.set('settings', { warm: { mode: 'both' } })
+    const { pane } = await mountPanel($, 'terminal', { scope: 'global', open: ['context'] })
+    await pane.press({ key: 'section-context-details' })
+    await pane.press({ key: 'details-mcp' })
+    expect(saved.get('settings')).toMatchObject({ warm: { mode: 'both' }, details: { mcp: true } })
+  })
+
+  test("keep-warm stops when its mode changes under it: another session's Pings never turn this one's reminder into pings", async ($, on) => {
+    const { ui, band, clock, forks, saved } = await start($, on, 'terminal', RATE_LIMITS, undefined, DEFAULTS, FIVE_M)
+    await turn($)
+    await ui.press({ key: 'keep-warm' })
+    expect(await band()).toContain(chipOf('terminal', 'keep-warm', warmLabel('terminal', 'Reminding'), CHIP_ON))
+    saved.set('settings', { warm: { mode: 'pings' } })
+    await clock.advance(30_000)
+    expect(await band()).toContain('stopped: mode changed')
+    await clock.advance(10 * MINUTE)
+    expect(forks.length).toBe(0)
+  })
+
+  test('no reminder while a turn runs: the turn refreshes the cache', async ($, on) => {
+    const { ui, clock, notes } = await start($, on, 'terminal', RATE_LIMITS, undefined, DEFAULTS, FIVE_M)
+    await turn($)
+    await ui.press({ key: 'keep-warm' })
+    // A prompt at 3:50, its turn still running past the reminder's 4:00.
+    await clock.advance(3 * MINUTE + 50_000)
+    await $.turn.start({ text: 'hi', turnId: 't2' })
+    await clock.advance(20_000)
+    expect(notes).toEqual([])
+  })
+
+  test("after /clear the banner shows the new conversation's context, not the last one's", async ($, on) => {
+    const context = { total: 212_200 }
+    const { band } = await start($, on, 'terminal', RATE_LIMITS, undefined, undefined, { context })
+    context.total = 50_000
+    await $.session.end({ reason: 'clear', sessionId: 'sess-1', resume: { id: 'sess-1' } })
+    expect(await band()).toContain('50k / 1M')
+  })
+
+  test('a run nobody is at the prompt for (claude -p, the SDK) writes no snapshot and no session file', async ($, on) => {
+    const { writes, sessionWrites, clock } = await boot($, on, null, RATE_LIMITS, { surfaces: [], interactive: false })
+    await clock.advance(30_000)
+    expect(writes.length).toBe(0)
+    expect(sessionWrites.length).toBe(0)
+  })
+
+  test('a transcript not found yet stores no title; looked for again 2 minutes on, it is read', async ($, on) => {
+    const { saved, files, clock } = await start($, on, 'terminal', RATE_LIMITS, undefined, monitorSettings({ name: 'title' }), {
+      sessionFiles: { 'session-1.json': otherSession('aa', 'C:/work/alpha', 0) },
+    })
+    await run($, 'monitor')
+    expect(saved.get('titles')).not.toHaveProperty('aa')
+    files.set(`${TRANSCRIPTS}/C--work-alpha/aa.jsonl`, { text: transcript('Alpha work', 'aa'), mtimeMs: NOW })
+    const monitor = await mountSessions($, 'terminal')
+    // Still fresh, the other session's file, as each tick goes by.
+    const keepFresh = (at: number) => {
+      const f = files.get(`${SESSIONS_DIR}/session-1.json`)!
+      files.set(`${SESSIONS_DIR}/session-1.json`, { ...f, text: f.text.replace(/"writtenAt":"[^"]*"/, `"writtenAt":"${new Date(at).toISOString()}"`) })
+    }
+    keepFresh(NOW + 30_000)
+    await clock.advance(30_000)
+    expect(await monitor()).toContain('"label":"[▾] alpha"')
+    keepFresh(NOW + 120_000)
+    await clock.advance(90_000)
+    expect(await monitor()).toContain('"label":"[▾] Alpha work"')
+  })
+
+  test('pressing Title reads every session\'s title, TW Monitor open or not', async ($, on) => {
+    const { saved, files } = await start($, on, 'terminal', RATE_LIMITS, undefined, undefined, {
+      sessionFiles: { 'session-1.json': otherSession('aa', 'C:/work/alpha', 10_000) },
+    })
+    files.set(`${TRANSCRIPTS}/C--work-alpha/aa.jsonl`, { text: transcript('Alpha work', 'aa'), mtimeMs: NOW })
+    const { pane } = await mountPanel($, 'terminal')
+    await pane.press({ key: 'scope-monitor' })
+    await pane.press({ key: 'section-monitor-name' })
+    await pane.press({ key: 'monitor-name-title' })
+    expect(saved.get('titles')).toMatchObject({ aa: { title: 'Alpha work' } })
+  })
+
+  test("a transcript under CLAUDE_CONFIG_DIR, or in another project's folder, is found", async ($, on) => {
+    const { files } = await start($, on, 'terminal', RATE_LIMITS, undefined, monitorSettings({ name: 'title' }), {
+      env: { USERPROFILE: 'C:/Users/test', CLAUDE_CONFIG_DIR: 'D:/cfg' },
+      sessionFiles: {
+        'session-1.json': otherSession('aa', 'C:/work/alpha', 10_000),
+        'session-2.json': otherSession('zz', 'C:/work/zulu', 10_000),
+      },
+    })
+    files.set('D:/cfg/projects/C--work-alpha/aa.jsonl', { text: transcript('Alpha work', 'aa'), mtimeMs: NOW })
+    // zz's transcript in a folder its path does not name: found by looking in each.
+    files.set('D:/cfg/projects/C--moved-elsewhere/zz.jsonl', { text: transcript('Zulu work', 'zz'), mtimeMs: NOW })
+    await run($, 'monitor')
+    const d = await (await mountSessions($, 'terminal'))()
+    expect(d).toContain('"label":"[▾] Alpha work"')
+    expect(d).toContain('"label":"[▾] Zulu work"')
+  })
+
+  test("a session file or stored windows that do not read as such are left out, not drawn", async ($, on) => {
+    const bad = otherSession('aa', 'C:/work/alpha', 10_000)
+    await start($, on, 'terminal', [], undefined, { limits: [{ kind: 5 }, { kind: 'five_hour', percentUsed: 'x' }] }, {
+      sessionFiles: {
+        'session-1.json': { ...bad, file: { ...bad.file, session: { id: 42, cwd: 'C:/work/alpha' } } },
+        'session-2.json': otherSession('zz', 'C:/work/zulu', 10_000),
+      },
+    })
+    await run($, 'monitor')
+    const d = await (await mountSessions($, 'terminal'))()
+    expect(d).not.toContain('alpha')
+    expect(d).toContain('"label":"[▾] zulu"')
+  })
+
+  test("the context's alert in this session's view: this session's own", async ($, on) => {
+    const { saved } = await start($, on, 'terminal', RATE_LIMITS)
+    const { pane } = await mountPanel($, 'terminal', { open: ['context'] })
+    await pane.press({ key: 'alert-CTX-enable' })
+    expect(saved.get(SESSION_KEY)).toMatchObject({ settings: { alert: { CTX: 99 } } })
+    expect(saved.get('settings')).toEqual({ warm: { mode: 'pings' } })
+  })
+
   test('Clear all data: ten presses within 5 s, counted down, clear every stored thing; fewer, or slower, clear nothing', async ($, on) => {
     const { saved, clock } = await start($, on, 'terminal', RATE_LIMITS, undefined, {
       settings: { warm: { mode: 'pings' }, show: { WK: { expanded: false } } },
@@ -3067,7 +3276,7 @@ describe('TW Monitor settings', () => {
     expect(saved.get('pinned')).toEqual({ aa: NOW })
     await clock.advance(5_000)
     for (let i = 0; i < 10; i++) await pane.press({ key: 'clear-all' })
-    for (const key of ['settings', 'pinned', 'view', 'limits', 'history']) expect(saved.get(key)).toBeUndefined()
+    expect([...saved.keys()]).toEqual([])
     expect(await drawn()).toContain('"key":"clear-all","label":"[Clear all data]"')
   })
 })

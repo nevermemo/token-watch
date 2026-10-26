@@ -26,10 +26,11 @@
 //   onto more lines when it does not fit. Then the TTL row: the prompt
 //   cache's time left over its whole TTL, "52:50 / 60:00", and the keep-warm
 //   Button, which says what pressing it would do or why it cannot ("Keep
-//   Warm", "Let Chill", "Cache Lost", "No Data"); while keep-warm is on, its
-//   caps, "Pings: 0/8  Time: 00:26 / 8:00:00", and a Refresh Caps Button; for
+//   Warm", "Let Chill", "Cache Lost", "No Data"; "Remind Me" and "Reminding"
+//   in Notify mode); while pings are on, their caps, "Pings: 0/8  Time:
+//   00:26 / 8:00:00", and a Refresh Caps Button (a reminder has no caps); for
 //   a minute after a ping or a stop, a dim note. The caps and the note go
-//   below 90 columns.
+//   below 90 columns, and cut at the edge above it.
 // Collapsed with bars ('bars'): one line in the table's language. Each usage
 //   window as label, a meter (10 cells, narrower where the line is short)
 //   and percentage; then CTX as label, the context bar filling the rest,
@@ -97,7 +98,8 @@ function displayNow(props: BandProps, state: Local) {
   return props.nowMs + (state.anchorNowMs === props.nowMs ? state.frameMs - state.anchorFrameMs : 0)
 }
 
-type Row = { label: string; bar: RenderElement[]; percent: number; detail: string; rate: string; forecast: string }
+// A row of the table, keyed by its window's kind (two kinds may share a label).
+type Row = { key: string; label: string; bar: RenderElement[]; percent: number; detail: string; rate: string; forecast: string }
 
 // A forecast's colour: "Safe" calm, a time until full a warning.
 const forecastColor = (forecast: string) => (forecast === 'Safe' ? SAFE : FORECAST)
@@ -277,7 +279,7 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
     if (props.forecastHidden.includes(partOf(limit))) return ''
     const p = props.pace.windows[limit.kind]
     if (!p) return ''
-    return p.fullAt === null ? 'Safe' : duration(p.fullAt - props.nowMs)
+    return p.fullAt === null ? 'Safe' : p.fullAt <= props.nowMs ? 'Full' : duration(p.fullAt - props.nowMs)
   }
 
   if (view !== 'expanded') {
@@ -359,6 +361,7 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
 
   const rows: Row[] = [
     ...limits.map(limit => ({
+      key: limit.kind,
       label: label(limit),
       bar: meter(draw, limit.percentUsed),
       percent: limit.percentUsed,
@@ -371,6 +374,7 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
     ...(showCtx
       ? [
           {
+            key: 'CTX',
             label: 'CTX',
             bar: bar(draw, current, TRACK, RESERVE),
             percent,
@@ -407,7 +411,7 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
     <Box flexDirection="column" borderStyle="round" borderDimColor={!isHovered} paddingX={1}>
       {rows.length === 0 && !showTtl && <Text dimColor>All parts are hidden.</Text>}
       {rows.map(row => (
-        <Box key={row.label} flexDirection="row" alignItems="center" columnGap={2}>
+        <Box key={row.key} flexDirection="row" alignItems="center" columnGap={2}>
           <Box width={labelWidth} flexShrink={0}>
             <Text dimColor wrap="truncate">
               {row.label}
@@ -476,9 +480,12 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
             <Text>{timerText(cache, now, isWorking)}</Text>
           </Box>
           {chip('keep-warm', warmLabel, timerFill, 'keep-warm')}
+          {/* The caps cut at the edge, rather than push the row past it. */}
           {showCaps && (
-            <Box flexShrink={0} marginLeft={1}>
-              <Text dimColor>{capsLine(keepWarm, props.cap, now)}</Text>
+            <Box flexShrink={1} minWidth={0} marginLeft={1}>
+              <Text dimColor wrap="truncate">
+                {capsLine(keepWarm, props.cap, now)}
+              </Text>
             </Box>
           )}
           {showCaps && chip('refresh-caps', 'Refresh Caps', CHIP_OFF, 'refresh-caps')}
@@ -592,7 +599,8 @@ function fit(
   let used = showDetail ? withCtx + 2 + detail.length : withCtx
   const showRates = ratesCells > 0 && columns - used - ratesCells >= keep
   if (showRates) used += ratesCells
-  const showForecasts = forecastCells > 0 && columns - used - forecastCells >= keep
+  // Forecasts only after the paces (when there are paces), in that order.
+  const showForecasts = forecastCells > 0 && (ratesCells === 0 || showRates) && columns - used - forecastCells >= keep
   if (showForecasts) used += forecastCells
   // The widest meters that leave the context bar its room; none if even the
   // narrowest do not.

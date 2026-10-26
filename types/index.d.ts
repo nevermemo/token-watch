@@ -53,15 +53,6 @@ export type MonitorSetting = {
   recentMin: number
   current: MonitorCurrent
 }
-export type MonitorOverride = {
-  usage?: Partial<Record<UsagePart, Partial<Record<MonitorUsagePiece, boolean>>>>
-  lines?: Partial<Record<MonitorState, { ctx?: Partial<MonitorLines['ctx']>; ttl?: Partial<MonitorLines['ttl']> }>>
-  name?: MonitorName
-  sort?: MonitorSort
-  filter?: MonitorFilter
-  recentMin?: number
-  current?: MonitorCurrent
-}
 
 // One plan usage window (five_hour, seven_day), as the status line has it.
 export type Limit = { kind: string; percentUsed: number; resetsAt?: string }
@@ -113,8 +104,6 @@ export type History = Record<string, { resetsAt: string | null; samples: Sample[
 // the window it is averaged over (minutes) and its unit.
 export type PaceSetting = { show: Record<View, boolean>; forecast: Record<View, boolean>; windowMin: number; unit: BurnUnit }
 
-// The settings, as one tree (../hooks/settings.ts): what each part shows in
-// each view, each usage part's pace, and keep-warm's caps by TTL.
 // What keep-warm does once on: ping, only remind with a notification before
 // the cache expires, or both (remind before the first ping of an idle spell).
 export type WarmMode = 'pings' | 'notify' | 'both'
@@ -122,6 +111,9 @@ export type WarmMode = 'pings' | 'notify' | 'both'
 // The parts that can raise an alert: the usage windows and the context.
 export type AlertPart = UsagePart | 'CTX'
 
+// The settings, as one tree (../hooks/settings.ts): what each part shows in
+// each view, each usage part's pace, keep-warm's caps, mode and reminder,
+// the alerts, the context's details lines, and TW Monitor's settings.
 export type SettingsTree = {
   show: Record<Part, Record<View, boolean>>
   pace: Record<UsagePart, PaceSetting>
@@ -136,7 +128,9 @@ export type SettingsTree = {
   monitor: MonitorSetting
 }
 
-// A session's own settings: any leaf of the tree, set or not.
+// A session's own settings: any leaf of the tree a session may set, set or
+// not. The usage windows' alerts and TW Monitor's settings are every
+// session's alone.
 export type SettingsOverride = {
   show?: Partial<Record<Part, Partial<Record<View, boolean>>>>
   pace?: Partial<
@@ -147,9 +141,8 @@ export type SettingsOverride = {
   >
   caps?: Partial<Record<Ttl, Partial<CapSetting>>>
   warm?: { mode?: WarmMode; lead?: Partial<Record<Ttl, number>> }
-  alert?: Partial<Record<AlertPart, number | null>>
+  alert?: { CTX?: number | null }
   details?: Partial<DetailsSetting>
-  monitor?: MonitorOverride
 }
 
 // What the band shows of the pace: per window kind, its rate, when it fills
@@ -158,7 +151,8 @@ export type Pace = {
   windows: Record<string, { perHour: number; fullAt: number | null; unit: BurnUnit }>
 }
 
-// Which settings the panel edits: this session's own, or every session's.
+// Which settings the panel shows: this session's own, every session's, or
+// TW Monitor's.
 export type Scope = 'session' | 'global' | 'monitor'
 
 // The prompt cache's time to live, as Claude Code requests it.
@@ -338,21 +332,23 @@ declare module 'claude-code' {
       // The usage windows' samples, shared through the store, for the burn
       // rates.
       history: History
-      // Which of the two the settings panel edits, and its open sections.
+      // Which settings the settings panel shows, and its open sections.
       scope: Scope
       openSections: string[]
       // The alert levels this session's context has crossed, and not fallen
       // back under since.
       ctxAlerted: number[]
-      // The other live sessions on this device, as TW Monitor last
-      // read their files, and the panel's sections closed (all open at first).
+      // The other live sessions on this device, as TW Monitor last read
+      // their files; and its sections toggled from how they start (open,
+      // save Hidden, which starts closed).
       sessions: SessionSnapshot[]
       sessionsClosed: string[]
       // The sessions' titles from their transcripts, by id (null for one with
       // none), read while TW Monitor's Name setting uses them.
       titles: Record<string, string | null>
-      // How many times "Clear all data" has been pressed in its window.
-      clearPresses: number
+      // "Clear all data": how many times it has been pressed since the first
+      // press of its window, and when that was.
+      clearPresses: { count: number; since: number }
       // The sessions pinned in TW Monitor, and those moved to its Hidden
       // section, by id, with when each was: shared through the store, so
       // every session's TW Monitor has them.
