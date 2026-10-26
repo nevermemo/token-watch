@@ -28,6 +28,41 @@ export type ContextDetails = {
 // Which of the context's details lines the expanded view shows.
 export type DetailsSetting = { mcp: boolean; memory: boolean; skills: boolean }
 
+// TW Monitor's settings: what each usage window's line shows; what a
+// session shows open (its lines) and closed (its heading's summary), for its
+// context and its cache; the name it goes by; the order of the unpinned;
+// which sessions it lists (all, those with a warm cache, or those that
+// answered within `recentMin` minutes); and whether this session stays on top
+// or follows the pins and Hidden like the rest. A group with all of its
+// pieces off is left out: a usage window, its section, a session's line.
+export type MonitorUsagePiece = 'bar' | 'percent' | 'reset' | 'rate'
+export type MonitorCtxPiece = 'bar' | 'percent' | 'tokens'
+export type MonitorTtlPiece = 'bar' | 'timer' | 'warm'
+export type MonitorState = 'expanded' | 'collapsed'
+export type MonitorLines = { ctx: Record<MonitorCtxPiece, boolean>; ttl: Record<MonitorTtlPiece, boolean> }
+export type MonitorName = 'folder' | 'title' | 'both'
+export type MonitorSort = 'name' | 'context' | 'expiry' | 'activity'
+export type MonitorFilter = 'all' | 'warm' | 'recent'
+export type MonitorCurrent = 'default' | 'top'
+export type MonitorSetting = {
+  usage: Record<UsagePart, Record<MonitorUsagePiece, boolean>>
+  lines: Record<MonitorState, MonitorLines>
+  name: MonitorName
+  sort: MonitorSort
+  filter: MonitorFilter
+  recentMin: number
+  current: MonitorCurrent
+}
+export type MonitorOverride = {
+  usage?: Partial<Record<UsagePart, Partial<Record<MonitorUsagePiece, boolean>>>>
+  lines?: Partial<Record<MonitorState, { ctx?: Partial<MonitorLines['ctx']>; ttl?: Partial<MonitorLines['ttl']> }>>
+  name?: MonitorName
+  sort?: MonitorSort
+  filter?: MonitorFilter
+  recentMin?: number
+  current?: MonitorCurrent
+}
+
 // One plan usage window (five_hour, seven_day), as the status line has it.
 export type Limit = { kind: string; percentUsed: number; resetsAt?: string }
 
@@ -98,6 +133,7 @@ export type SettingsTree = {
   alert: Record<AlertPart, number | null>
   // The context's details lines in the expanded view.
   details: DetailsSetting
+  monitor: MonitorSetting
 }
 
 // A session's own settings: any leaf of the tree, set or not.
@@ -113,6 +149,7 @@ export type SettingsOverride = {
   warm?: { mode?: WarmMode; lead?: Partial<Record<Ttl, number>> }
   alert?: Partial<Record<AlertPart, number | null>>
   details?: Partial<DetailsSetting>
+  monitor?: MonitorOverride
 }
 
 // What the band shows of the pace: per window kind, its rate, when it fills
@@ -122,7 +159,7 @@ export type Pace = {
 }
 
 // Which settings the panel edits: this session's own, or every session's.
-export type Scope = 'session' | 'global'
+export type Scope = 'session' | 'global' | 'monitor'
 
 // The prompt cache's time to live, as Claude Code requests it.
 export type Ttl = '5m' | '1h'
@@ -236,6 +273,9 @@ export type SessionSnapshot = {
   endedAt: string | null
   session: { id: string | null; cwd: string | null; root: string | null }
   isWorking: boolean
+  // When its last response ended, for the "recent" filter and the order by
+  // last activity; null before its first.
+  lastActiveAt?: string | null
   context: { total: number; window: number; percent: number } | null
   cache: {
     ttl: Ttl
@@ -308,6 +348,11 @@ declare module 'claude-code' {
       // read their files, and the panel's sections closed (all open at first).
       sessions: SessionSnapshot[]
       sessionsClosed: string[]
+      // The sessions' titles from their transcripts, by id (null for one with
+      // none), read while TW Monitor's Name setting uses them.
+      titles: Record<string, string | null>
+      // How many times "Clear all data" has been pressed in its window.
+      clearPresses: number
       // The sessions pinned in TW Monitor, and those moved to its Hidden
       // section, by id, with when each was: shared through the store, so
       // every session's TW Monitor has them.

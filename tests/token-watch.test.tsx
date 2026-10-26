@@ -170,6 +170,8 @@ type Boot = {
   // The directory the session is in, which a shell `cd` moves; C:/proj (its
   // root) by default.
   cwd?: string
+  // False: there is no git to search a large transcript with.
+  git?: false
   // Files already in the sessions folder (other sessions'), by name: each
   // one's content (an object is written as JSON) and its mtime.
   sessionFiles?: Record<string, { file: unknown; mtimeMs: number }>
@@ -220,7 +222,8 @@ async function boot($: Engine, on: On, surface: 'terminal' | 'desktop' | null, r
   // The sessions folder, kept in memory: what is in it and every write to it
   // (`writes` holds the usage snapshot's alone).
   const sessionWrites: Write[] = []
-  const files = new Map<string, { text: string; mtimeMs: number }>(
+  const runs: (readonly string[])[] = []
+  const files = new Map<string, { text: string; mtimeMs: number; size?: number }>(
     Object.entries(options.sessionFiles ?? {}).map(([name, { file, mtimeMs }]) => [
       `${SESSIONS_DIR}/${name}`,
       { text: typeof file === 'string' ? file : JSON.stringify(file), mtimeMs },
@@ -274,11 +277,25 @@ async function boot($: Engine, on: On, surface: 'terminal' | 'desktop' | null, r
   on('session.id', () => ({ value: 'sess-1' }))
   on('session.cwd', () => ({ value: options.cwd ?? 'C:/proj' }))
   on('session.root', () => ({ value: 'C:/proj' }))
-  on('fs.stat', () =>
-    (options.statMtimeMs === undefined
+  // A file of the in-memory folder by its size (`size` for one standing in
+  // for a large file), else the snapshot as `statMtimeMs` says.
+  on('fs.stat', ($, e) => {
+    const f = files.get(slash(e.path))
+    if (f !== undefined) return { value: { kind: 'file', size: f.size ?? f.text.length, mtimeMs: f.mtimeMs, isLink: false } }
+    return options.statMtimeMs === undefined
       ? { deny: 'ENOENT' }
-      : { value: { kind: 'file', size: 1, mtimeMs: options.statMtimeMs, isLink: false } }),
-  )
+      : { value: { kind: 'file', size: 1, mtimeMs: options.statMtimeMs, isLink: false } }
+  })
+  // git grep over the in-memory folder, for a transcript too large to read:
+  // each line's matches of the title pattern; a failure if `git` is false.
+  on('process.run', ($, e) => {
+    if (options.git === false || e.argv[0] !== 'git') return { deny: 'ENOENT: git' }
+    const file = files.get(`${slash(e.init?.cwd ?? '')}/${e.argv[e.argv.length - 1]}`)
+    const found = (file?.text ?? '').match(/"customTitle":"(\\.|[^"])*"/g) ?? []
+    runs.push(e.argv)
+    const stdout = found.map(f => `${f}\n`).join('')
+    return { value: { exitCode: found.length > 0 ? 0 : 1, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
   on('ui.open', ($, e) => {
     opens.push({ ...e })
     return { value: options.paneUnplaced ? { isPlaced: false, reason: options.paneUnplaced } : { isPlaced: true } }
@@ -311,15 +328,16 @@ async function boot($: Engine, on: On, surface: 'terminal' | 'desktop' | null, r
     const f = files.get(slash(e.path))
     return f === undefined ? { deny: 'ENOENT' } : { value: f.text }
   })
+  on('fs.exists', ($, e) => ({ value: files.has(slash(e.path)) }))
   await $.session.start({ cwd: '.', surface, isInteractive: true })
 
-  return { writes, saved, clock, forks, opens, closes, notes, sessionWrites, files }
+  return { writes, saved, clock, forks, opens, closes, notes, sessionWrites, files, runs }
 }
 
 // `beneath`: text a mod beneath this one draws in the band, if any.
 // `stored`: what the mod's store holds from earlier sessions.
 async function start($: Engine, on: On, surface: Surface, rateLimits: SessionRateLimit[], beneath?: string, stored?: Record<string, unknown>, options: Boot = {}) {
-  const { writes, saved, clock, forks, opens, closes, notes, sessionWrites, files } = await boot($, on, surface, rateLimits, { ...options, beneath, stored })
+  const { writes, saved, clock, forks, opens, closes, notes, sessionWrites, files, runs } = await boot($, on, surface, rateLimits, { ...options, beneath, stored })
   const ui = await $.ui.mount<Surface, 'AbovePrompt'>({ ...BAND, surface })
   await ui.resize({ columns: 116, rows: 8, in: 'band' })
   const band = async () => JSON.stringify(await ui.drawn({ in: 'band' }))
@@ -327,7 +345,7 @@ async function start($: Engine, on: On, surface: Surface, rateLimits: SessionRat
   // The whole drawing, the settings button beside the band included.
   const tree = async () => JSON.stringify(await ui.drawn())
 
-  return { ui, band, tree, writes, saved, clock, forks, opens, closes, notes, sessionWrites, files }
+  return { ui, band, tree, writes, saved, clock, forks, opens, closes, notes, sessionWrites, files, runs }
 }
 
 // One main-thread turn, started and ended at the clock's time now.
@@ -1416,25 +1434,25 @@ describe('settings panel', () => {
       const opened = await drawn()
       expect(opened).toContain('"key":"section-usage","label":"[▾] Usage","plain":true}')
       expect(opened).toContain('"children":["[▾] ",{"type":"Text","props":{"bold":true')
-      expect(opened).toContain('"key":"section-usage-5H-show","label":"[▸] Show on band","plain":true}')
-      expect(opened).toContain('"children":["[▸] ",{"type":"Text","children":["Show on band"]}]')
+      expect(opened).toContain('"key":"section-usage-5H-show","label":"[▸] Show on banner","plain":true}')
+      expect(opened).toContain('"children":["[▸] ",{"type":"Text","children":["Show on banner"]}]')
     })
 
     test(`${surface}: every Button is plain; checkboxes and radio buttons hold their labels; steppers, resets and Enable bracketed`, async ($, on) => {
       await start($, on, surface, RATE_LIMITS)
-      // usage-5H opens with its rows: Show on band, Burn rate and the rest.
+      // usage-5H opens with its rows: Show on banner, Burn rate and the rest.
       const { pane, drawn } = await mountPanel($, surface, { open: ['usage', 'usage-5H'] })
       await pane.press({ key: 'show-5H-expanded' })
       const all = await drawn()
       expect(all).toContain(`${toggle(surface, 'show-5H-plain', true)}Minimal","plain":true`)
       expect(all).toContain(`${toggle(surface, 'show-5H-expanded', false)}Expanded","plain":true`)
-      expect(all).toContain(radio(surface, 'scope-session', 'This session', true))
-      expect(all).toContain(radio(surface, 'scope-global', 'All sessions', false))
+      expect(all).toContain(radio(surface, 'scope-session', 'Session', true))
+      expect(all).toContain(radio(surface, 'scope-global', 'Global', false))
       expect(all).toContain(radio(surface, 'unit-5H-h', '%/h', true))
       expect(all).toContain('"key":"window-5H-down","label":"[-]","plain":true')
       expect(all).toContain('"key":"window-5H-up","label":"[+]","plain":true')
       expect(all).toContain('"key":"reset-show-5H","label":"[reset]","plain":true')
-      expect(all).toContain('"key":"reset-session","label":"[Reset this session]","plain":true')
+      expect(all).toContain('"key":"reset-session","label":"[Reset to global]","plain":true')
       // No Button keeps the native frame; no mark is bracketed; and a label
       // is never drawn beside its mark's Button.
       expect(count(all, '"type":"Button"')).toBe(count(all, '"plain":true'))
@@ -1674,8 +1692,8 @@ describe('settings scopes', () => {
     test(`${surface}: the panel edits this session by default: a toggle overrides the global setting here only, and reset gives it back`, async ($, on) => {
       const { band, saved } = await start($, on, surface, RATE_LIMITS)
       const { pane, drawn } = await mountPanel($, surface, { open: ['usage', 'usage-5H'] })
-      expect(await drawn()).toContain(radio(surface, 'scope-session', 'This session', true))
-      expect(await drawn()).toContain(radio(surface, 'scope-global', 'All sessions', false))
+      expect(await drawn()).toContain(radio(surface, 'scope-session', 'Session', true))
+      expect(await drawn()).toContain(radio(surface, 'scope-global', 'Global', false))
       await pane.press({ key: 'show-5H-expanded' })
       expect(saved.get(SESSION_KEY)).toMatchObject({ settings: { show: { '5H': { expanded: false } } } })
       expect(saved.get('settings')).toEqual({ warm: { mode: 'pings' } })
@@ -2296,6 +2314,7 @@ describe('TW Monitor', () => {
       endedAt: null,
       session: { id: 'sess-1', cwd: 'C:/proj', root: 'C:/proj' },
       isWorking: false,
+      lastActiveAt: null,
       context: { total: 212_200, window: 1_000_000, percent: 21 },
       cache: { ttl: '1h', expiresAt: null, warm: false, keepWarm: { on: false, mode: 'pings' } },
     })
@@ -2402,7 +2421,7 @@ describe('TW Monitor', () => {
     expect(drawn).toContain('"No data"')
     expect(drawn).toContain('"64%"')
     expect(drawn).toContain('"52m"')
-    expect(drawn).toContain('"keep-warm: Pings"')
+    expect(drawn).toContain('"(Ping)"')
     expect(drawn).toContain('"Cold"')
     expect(drawn).not.toContain('gone')
     expect(drawn).not.toContain('done')
@@ -2482,7 +2501,9 @@ describe('TW Monitor', () => {
       await pane.press({ key: 'fold-session-sess-1' })
       const one = await drawn()
       expect(one).toContain(`"key":"fold-session-sess-1","label":"${heading(shut, '› proj')}"`)
-      expect(one).toContain(pieces(tint('CTX '), tint('21%', GREEN), tint(' · '), tint('TTL '), tint('No data', RED)))
+      // By default a closed session shows its countdown alone.
+      expect(one).toContain(pieces(tint('TTL '), tint('No data', RED)))
+      expect(one).not.toContain('"children":["CTX "]')
       expect(one).not.toContain('"212k / 1M"')
       expect(one).toContain('"640k / 1M"')
       // Usage closes to the windows' percentages; Sessions to the count.
@@ -2502,7 +2523,7 @@ describe('TW Monitor', () => {
   test("a session's figures in their colours, open or closed: the context by level; the countdown green with keep-warm on, grey off, red cold or without data", async ($, on) => {
     const warmOff = { ttl: '1h', expiresAt: new Date(NOW + 20 * MINUTE).toISOString(), warm: true, keepWarm: { on: false, mode: 'notify' } }
     const cold = { ttl: '5m', expiresAt: new Date(NOW - MINUTE).toISOString(), warm: false, keepWarm: { on: false, mode: 'notify' } }
-    await start($, on, 'desktop', RATE_LIMITS, undefined, undefined, {
+    await start($, on, 'desktop', RATE_LIMITS, undefined, monitorSettings({ lines: { collapsed: { ctx: { percent: true } } } }), {
       sessionFiles: {
         'session-1.json': otherSession('on', 'C:/work/a-on', 10_000),
         'session-2.json': otherSession('off', 'C:/work/b-off', 10_000, {
@@ -2728,6 +2749,326 @@ describe('TW Monitor', () => {
     expect(drawn).toContain('"› proj"')
     expect(drawn).not.toContain('"web"')
     expect(drawn).toContain('usage snapshot option')
+  })
+})
+
+// A transcript in the test's projects folder, with a title line among others.
+const TRANSCRIPTS = 'C:/Users/test/.claude/projects'
+const transcript = (title: string, id: string) =>
+  [
+    JSON.stringify({ type: 'user', message: { content: 'hi' }, sessionId: id }),
+    JSON.stringify({ type: 'custom-title', customTitle: title, sessionId: id }),
+    JSON.stringify({ type: 'assistant', message: { content: 'ok' }, sessionId: id }),
+  ].join('\n')
+
+// TW Monitor's settings, as the store keeps them, for a test to start with.
+const monitorSettings = (monitor: Record<string, unknown>) => ({ settings: { warm: { mode: 'pings' }, monitor } })
+
+// The order of sessions' headings in a drawing, by the names given.
+const orderIn = (drawn: string, names: string[]) =>
+  [...names].sort((a, b) => drawn.indexOf(`"label":"[▾] ${a}"`) - drawn.indexOf(`"label":"[▾] ${b}"`))
+
+describe('TW Monitor settings', () => {
+  test("the Monitor view: TW Monitor's settings alone, the same for every session", async ($, on) => {
+    const { saved } = await start($, on, 'terminal', RATE_LIMITS)
+    const { pane, drawn } = await mountPanel($, 'terminal')
+    expect(await drawn()).toContain(radio('terminal', 'scope-session', 'Session', true))
+    expect(await drawn()).toContain(radio('terminal', 'scope-monitor', 'Monitor', false))
+    await pane.press({ key: 'scope-monitor' })
+    const d = await drawn()
+    expect(d).toContain(radio('terminal', 'scope-monitor', 'Monitor', true))
+    for (const id of ['usage', 'lines', 'name', 'sort', 'filter', 'current']) expect(d).toContain(`"key":"section-monitor-${id}"`)
+    expect(d).not.toContain('"key":"section-usage"')
+    expect(d).not.toContain('"key":"reset-session"')
+    expect(d).toContain('"key":"unpin-all","label":"[Unpin all sessions]","plain":true,"dimColor":true')
+    expect(d).toContain('"key":"reset-monitor","label":"[Reset to default]","plain":true,"dimColor":true')
+    // Under the settings, not above them.
+    expect(d.indexOf('"key":"section-monitor-current"')).toBeLessThan(d.indexOf('"key":"reset-monitor"'))
+    // Usage: a row per window, each piece a checkbox, every one on.
+    await pane.press({ key: 'section-monitor-usage' })
+    await pane.press({ key: 'section-monitor-usage-WK' })
+    for (const [piece, name] of [['bar', 'Bar'], ['percent', 'Percentage'], ['reset', 'Reset timer'], ['rate', 'Burn rate']]) {
+      expect(await drawn()).toContain(`${toggle('terminal', `monitor-usage-WK-${piece}`, true)}${name}"`)
+    }
+    // Session lines: Expanded and Collapsed, each with CTX and TTL.
+    await pane.press({ key: 'section-monitor-lines' })
+    await pane.press({ key: 'section-monitor-lines-collapsed' })
+    const lines = await drawn()
+    expect(lines).toContain(`${toggle('terminal', 'monitor-lines-collapsed-ctx-bar', false)}Bar"`)
+    expect(lines).toContain(`${toggle('terminal', 'monitor-lines-collapsed-ctx-percent', false)}Percentage"`)
+    expect(lines).toContain(`${toggle('terminal', 'monitor-lines-collapsed-ttl-timer', true)}Timer"`)
+    expect(lines).toContain(`${toggle('terminal', 'monitor-lines-collapsed-ttl-warm', true)}Keep-warm"`)
+    // Set for every session, never as this session's own.
+    await pane.press({ key: 'monitor-usage-WK-rate' })
+    expect(saved.get('settings')).toMatchObject({ monitor: { usage: { WK: { rate: false } } } })
+    expect((saved.get(SESSION_KEY) as { settings?: { monitor?: unknown } } | undefined)?.settings?.monitor).toBeUndefined()
+  })
+
+  test('Usage: a window with nothing on is left out; with every window so, the section and its line, and the refresh moves to Sessions', async ($, on) => {
+    const off = { bar: false, percent: false, reset: false, rate: false }
+    await start($, on, 'terminal', RATE_LIMITS, undefined, monitorSettings({ usage: { '5H': off, WK: { bar: false, reset: false } } }))
+    await run($, 'monitor')
+    const monitor = await mountSessions($, 'terminal')
+    const some = await monitor()
+    // 5H gone; WK's percentage and burn rate, without its bar or reset time.
+    expect(some).toContain('"key":"fold-usage"')
+    expect(some).not.toContain('"children":["5H"]')
+    expect(some).toContain('"children":["WK"]')
+    expect(some).toContain('"31%"')
+    expect(some).not.toContain('3d 4h')
+    // WK's line: its label, then straight to its percentage, no bar.
+    expect(some).toContain(
+      '"children":["WK"]}]},{"type":"Box","props":{"width":8,"flexShrink":0},"children":[{"type":"Text","props":{"color":"#8fd18f","wrap":"truncate"},"children":["31%"]}',
+    )
+    expect(some).toContain('─'.repeat(50))
+    // Every window off: no Usage, no line under it; the refresh on Sessions.
+    const { pane } = await mountPanel($, 'terminal')
+    await pane.press({ key: 'scope-monitor' })
+    await pane.press({ key: 'section-monitor-usage' })
+    await pane.press({ key: 'section-monitor-usage-WK' })
+    for (const piece of ['percent', 'rate']) await pane.press({ key: `monitor-usage-WK-${piece}` })
+    const none = await monitor()
+    expect(none).not.toContain('"key":"fold-usage"')
+    expect(none).not.toContain('─')
+    expect(none.indexOf('"key":"fold-sessions"')).toBeLessThan(none.indexOf('"key":"refresh","label":"[↻]","plain":true,"dimColor":true'))
+    expect(none).toContain('"key":"fold-hidden"')
+  })
+
+  test('the refresh, at the top right: on the Usage heading, and it reads the other sessions now', async ($, on) => {
+    const { files } = await start($, on, 'desktop', RATE_LIMITS)
+    await run($, 'monitor')
+    const pane = await $.ui.mount<Surface, 'Pane'>({ ...SESSIONS_PANE, surface: 'desktop' })
+    const drawn = async () => JSON.stringify(await pane.drawn())
+    const first = await drawn()
+    expect(first.indexOf('"key":"fold-usage"')).toBeLessThan(first.indexOf('"key":"refresh","label":"↻"'))
+    expect(first.indexOf('"key":"refresh"')).toBeLessThan(first.indexOf('"key":"fold-sessions"'))
+    const other = otherSession('new', 'C:/work/new', 0)
+    files.set(`${SESSIONS_DIR}/session-7.json`, { text: JSON.stringify(other.file), mtimeMs: NOW })
+    expect(await drawn()).not.toContain('"new"')
+    await pane.press({ key: 'refresh' })
+    expect(await drawn()).toContain('[▾] new')
+  })
+
+  test('Session lines: each piece of CTX and TTL, open and closed, on its own; a line with none left out', async ($, on) => {
+    await start($, on, 'terminal', RATE_LIMITS, undefined, monitorSettings({
+      usage: { '5H': { bar: false, percent: false, reset: false, rate: false }, WK: { bar: false, percent: false, reset: false, rate: false } },
+      lines: {
+        expanded: { ctx: { bar: false, tokens: false }, ttl: { bar: false, timer: false, warm: false } },
+        collapsed: { ctx: { bar: true, percent: true, tokens: true }, ttl: { bar: true, warm: true } },
+      },
+    }), { sessionFiles: { 'session-1.json': otherSession('zz', 'C:/work/zulu', 10_000) } })
+    await run($, 'monitor')
+    const pane = await $.ui.mount<Surface, 'Pane'>({ ...SESSIONS_PANE, surface: 'terminal' })
+    const open = JSON.stringify(await pane.drawn())
+    // Open: CTX's percentage alone; no TTL line at all.
+    expect(open).toContain('"64%"')
+    expect(open).not.toContain('640k')
+    expect(open).not.toContain('▄')
+    expect(open).not.toContain('"children":["TTL"]')
+    // Closed: every piece, a space between, the groups by a dot.
+    await pane.press({ key: 'fold-session-zz' })
+    const shut = JSON.stringify(await pane.drawn())
+    expect(shut).toContain(
+      '"children":["CTX "]},{"type":"Box","props":{"key":"1","flexShrink":0},"children":[{"type":"Box","props":{"flexDirection":"row","flexShrink":0},"children":[{"type":"Text","props":{"color":"#e8c66a"},"children":["▄▄▄"]}',
+    )
+    expect(shut).toContain('"children":["64%"]},{"type":"Text","props":{"dimColor":true,"wrap":"truncate"},"children":[" "]},{"type":"Text","props":{"dimColor":true,"wrap":"truncate"},"children":["640k / 1M"]}')
+    expect(shut).toContain('"children":["52m"]},{"type":"Text","props":{"dimColor":true,"wrap":"truncate"},"children":[" "]},{"type":"Text","props":{"dimColor":true,"wrap":"truncate"},"children":["(Ping)"]}')
+  })
+
+  test('Name: titles read from the transcripts when a session is listed or the button pressed, never on a timer', async ($, on) => {
+    const { saved, files, clock } = await start($, on, 'terminal', RATE_LIMITS, undefined, undefined, {
+      sessionFiles: { 'session-1.json': otherSession('aa', 'C:/work/alpha', 10_000) },
+    })
+    files.set(`${TRANSCRIPTS}/C--proj/sess-1.jsonl`, { text: transcript('Own work', 'sess-1'), mtimeMs: NOW })
+    files.set(`${TRANSCRIPTS}/C--work-alpha/aa.jsonl`, { text: transcript('Alpha work', 'aa'), mtimeMs: NOW })
+    await run($, 'monitor')
+    const monitor = await mountSessions($, 'terminal')
+    // By folder: no transcript read, nothing stored.
+    expect(await monitor()).toContain('"label":"[▾] alpha"')
+    expect(saved.get('titles')).toBeUndefined()
+    const { pane } = await mountPanel($, 'terminal')
+    await pane.press({ key: 'scope-monitor' })
+    await pane.press({ key: 'section-monitor-name' })
+    await pane.press({ key: 'monitor-name-title' })
+    expect(saved.get('titles')).toEqual({ 'sess-1': { title: 'Own work', at: NOW }, aa: { title: 'Alpha work', at: NOW } })
+    expect(await monitor()).toContain('"label":"[▾] Alpha work"')
+    expect(await monitor()).toContain('"label":"[▾] › Own work"')
+    // Renamed: not read again on its own, tick after tick (within the 2
+    // minutes the other session's file stays fresh).
+    files.set(`${TRANSCRIPTS}/C--work-alpha/aa.jsonl`, { text: transcript('Alpha, renamed', 'aa'), mtimeMs: NOW })
+    await clock.advance(3 * 30_000)
+    expect(await monitor()).toContain('"label":"[▾] Alpha work"')
+    // The button again: every listed session read again.
+    await pane.press({ key: 'monitor-name-title' })
+    expect(await monitor()).toContain('"label":"[▾] Alpha, renamed"')
+    await pane.press({ key: 'monitor-name-both' })
+    expect(await monitor()).toContain('"label":"[▾] alpha / Alpha, renamed"')
+    // A session listed later has its title read then.
+    const zz = otherSession('zz', 'C:/work/zulu', 0)
+    files.set(`${TRANSCRIPTS}/C--work-zulu/zz.jsonl`, { text: transcript('Zulu work', 'zz'), mtimeMs: NOW })
+    files.set(`${SESSIONS_DIR}/session-5.json`, { text: JSON.stringify({ ...zz.file, writtenAt: new Date(NOW + 90_000).toISOString() }), mtimeMs: NOW + 90_000 })
+    await clock.advance(30_000)
+    expect(await monitor()).toContain('"label":"[▾] zulu / Zulu work"')
+  })
+
+  test('a transcript past what $.fs.read takes (4 MiB) is searched with git grep from its folder; with no git, the folder names it', async ($, on) => {
+    const big = { size: 5 * 1024 * 1024, mtimeMs: NOW }
+    const { files, runs } = await start($, on, 'terminal', RATE_LIMITS, undefined, monitorSettings({ name: 'title' }), {
+      sessionFiles: {
+        'session-1.json': otherSession('aa', 'C:/work/alpha', 10_000),
+        'session-2.json': otherSession('zz', 'C:/work/zulu', 10_000),
+      },
+    })
+    files.set(`${TRANSCRIPTS}/C--work-alpha/aa.jsonl`, { ...big, text: transcript('First', 'aa') + '\n' + transcript('Quoted "name"', 'aa') })
+    files.set(`${TRANSCRIPTS}/C--work-zulu/zz.jsonl`, { text: transcript('Small one', 'zz'), mtimeMs: NOW })
+    await run($, 'monitor')
+    const d = await (await mountSessions($, 'terminal'))()
+    expect(d).toContain('"label":"[▾] Quoted \\"name\\""')
+    expect(d).toContain('"label":"[▾] Small one"')
+    // git for the large one alone, run from its folder with the file's name.
+    expect(runs).toEqual([['git', 'grep', '--no-index', '--no-color', '-h', '-o', '-E', '-e', '"customTitle":"(\\\\.|[^"])*"', '--', 'aa.jsonl']])
+  })
+
+  test('with no git, a large transcript leaves its session named by its folder', async ($, on) => {
+    const { files } = await start($, on, 'terminal', RATE_LIMITS, undefined, monitorSettings({ name: 'title' }), {
+      git: false,
+      sessionFiles: { 'session-1.json': otherSession('aa', 'C:/work/alpha', 10_000) },
+    })
+    files.set(`${TRANSCRIPTS}/C--work-alpha/aa.jsonl`, { text: transcript('Alpha work', 'aa'), mtimeMs: NOW, size: 5 * 1024 * 1024 })
+    await run($, 'monitor')
+    expect(await (await mountSessions($, 'terminal'))()).toContain('"label":"[▾] alpha"')
+  })
+
+  for (const [sort, order] of [
+    ['name', ['alpha', 'bravo', 'charlie']],
+    ['context', ['bravo', 'charlie', 'alpha']],
+    ['expiry', ['alpha', 'bravo', 'charlie']],
+    ['activity', ['bravo', 'charlie', 'alpha']],
+  ] as const) {
+    test(`Sort by ${sort}; pinned ones first either way`, async ($, on) => {
+      const session = (id: string, name: string, percent: number, expiresIn: number, activeAgo: number) =>
+        otherSession(id, `C:/work/${name}`, 10_000, {
+          context: { total: percent * 10_000, window: 1_000_000, percent },
+          cache: { ttl: '1h', expiresAt: new Date(NOW + expiresIn).toISOString(), warm: expiresIn > 0, keepWarm: { on: false, mode: 'notify' } },
+          lastActiveAt: new Date(NOW - activeAgo).toISOString(),
+        })
+      await start($, on, 'terminal', RATE_LIMITS, undefined, monitorSettings({ sort }), {
+        sessionFiles: {
+          'session-1.json': session('a', 'alpha', 30, 10 * MINUTE, 50 * MINUTE),
+          'session-2.json': session('b', 'bravo', 80, 40 * MINUTE, 5 * MINUTE),
+          'session-3.json': session('c', 'charlie', 55, -MINUTE, 20 * MINUTE),
+        },
+      })
+      await run($, 'monitor')
+      const pane = await $.ui.mount<Surface, 'Pane'>({ ...SESSIONS_PANE, surface: 'terminal' })
+      const d = JSON.stringify(await pane.drawn())
+      expect(orderIn(d, ['› proj', ...order])).toEqual(['› proj', ...order])
+      await pane.press({ key: `pin-${order[2][0]}` })
+      const pinnedFirst = JSON.stringify(await pane.drawn())
+      expect(orderIn(pinnedFirst, ['› proj', ...order])).toEqual(['› proj', order[2], order[0], order[1]])
+    })
+  }
+
+  test('Show: warm caches only, or those that answered recently, within a stepper', async ($, on) => {
+    const session = (id: string, name: string, expiresIn: number, activeAgo: number) =>
+      otherSession(id, `C:/work/${name}`, 10_000, {
+        cache: { ttl: '1h', expiresAt: new Date(NOW + expiresIn).toISOString(), warm: expiresIn > 0, keepWarm: { on: false, mode: 'notify' } },
+        lastActiveAt: new Date(NOW - activeAgo).toISOString(),
+      })
+    const { saved } = await start($, on, 'terminal', RATE_LIMITS, undefined, monitorSettings({ filter: 'warm' }), {
+      sessionFiles: {
+        'session-1.json': session('b', 'bravo', 40 * MINUTE, 5 * MINUTE),
+        'session-2.json': session('c', 'charlie', -MINUTE, 20 * MINUTE),
+      },
+    })
+    await run($, 'monitor')
+    const monitor = await mountSessions($, 'terminal')
+    expect(await monitor()).toContain('[▾] bravo')
+    expect(await monitor()).not.toContain('charlie')
+    // This session is listed whatever the filter.
+    expect(await monitor()).toContain('[▾] › proj')
+    const { pane, drawn } = await mountPanel($, 'terminal')
+    await pane.press({ key: 'scope-monitor' })
+    await pane.press({ key: 'section-monitor-filter' })
+    expect(await drawn()).not.toContain('"key":"recent-up"')
+    await pane.press({ key: 'monitor-filter-recent' })
+    expect(await drawn()).toContain('"1 d"')
+    for (let i = 0; i < 5; i++) await pane.press({ key: 'recent-down' })
+    expect(await drawn()).toContain('"1 h"')
+    for (let i = 0; i < 2; i++) await pane.press({ key: 'recent-down' })
+    expect(saved.get('settings')).toMatchObject({ monitor: { filter: 'recent', recentMin: 15 } })
+    expect(await monitor()).toContain('[▾] bravo')
+    expect(await monitor()).not.toContain('charlie')
+    await pane.press({ key: 'recent-up' })
+    expect(await monitor()).toContain('[▾] charlie')
+  })
+
+  test('Current session, Default: this session follows the pins, Hidden and the order like any other', async ($, on) => {
+    await start($, on, 'terminal', RATE_LIMITS, undefined, { ...monitorSettings({ current: 'default' }), pinned: { zz: NOW } }, {
+      sessionFiles: {
+        'session-1.json': otherSession('aa', 'C:/work/alpha', 10_000),
+        'session-2.json': otherSession('zz', 'C:/work/zulu', 10_000),
+      },
+    })
+    await run($, 'monitor')
+    const pane = await $.ui.mount<Surface, 'Pane'>({ ...SESSIONS_PANE, surface: 'terminal' })
+    const d = JSON.stringify(await pane.drawn())
+    expect(orderIn(d, ['› proj', 'alpha', 'zulu'])).toEqual(['zulu', 'alpha', '› proj'])
+    await pane.press({ key: 'hide-sess-1' })
+    await pane.press({ key: 'fold-hidden' })
+    const hidden = JSON.stringify(await pane.drawn())
+    expect(hidden.indexOf('"label":"[▾] Hidden"')).toBeLessThan(hidden.indexOf('"label":"[▾] › proj"'))
+  })
+
+  test('Unpin all and Restore all hidden, for every session', async ($, on) => {
+    const { saved } = await start($, on, 'terminal', RATE_LIMITS, undefined, { pinned: { aa: NOW }, hiddenSessions: { zz: NOW } })
+    const { pane, drawn } = await mountPanel($, 'terminal')
+    await pane.press({ key: 'scope-monitor' })
+    expect(await drawn()).toContain('"key":"unpin-all","label":"[Unpin all sessions]","plain":true}')
+    await pane.press({ key: 'unpin-all' })
+    expect(saved.get('pinned')).toEqual({})
+    await pane.press({ key: 'restore-all' })
+    expect(saved.get('hiddenSessions')).toEqual({})
+    expect(await drawn()).toContain('"key":"restore-all","label":"[Unhide all sessions]","plain":true,"dimColor":true')
+  })
+
+  test('Reset to default puts TW Monitor back; Reset to defaults leaves it, and the resets sit under the settings', async ($, on) => {
+    const { saved } = await start($, on, 'terminal', RATE_LIMITS, undefined, {
+      settings: { warm: { mode: 'pings' }, show: { WK: { expanded: false } }, monitor: { sort: 'context' } },
+    })
+    const { pane, drawn } = await mountPanel($, 'terminal', { scope: 'global' })
+    const global = await drawn()
+    expect(global.indexOf('"key":"section-cache"')).toBeLessThan(global.indexOf('"key":"reset-defaults"'))
+    await pane.press({ key: 'reset-defaults' })
+    expect(saved.get('settings')).toMatchObject({ monitor: { sort: 'context' }, show: { WK: { expanded: true } } })
+    await pane.press({ key: 'scope-monitor' })
+    await pane.press({ key: 'reset-monitor' })
+    expect(saved.get('settings')).toMatchObject({ monitor: { sort: 'name' } })
+  })
+
+  test('Clear all data: ten presses within 5 s, counted down, clear every stored thing; fewer, or slower, clear nothing', async ($, on) => {
+    const { saved, clock } = await start($, on, 'terminal', RATE_LIMITS, undefined, {
+      settings: { warm: { mode: 'pings' }, show: { WK: { expanded: false } } },
+      pinned: { aa: NOW },
+      view: 'plain',
+    })
+    const { pane, drawn } = await mountPanel($, 'terminal', { scope: 'global' })
+    // Below everything, with its note.
+    const first = await drawn()
+    expect(first.indexOf('/token-watch settings opens this panel again')).toBeLessThan(first.indexOf('"key":"clear-all"'))
+    expect(first).toContain('Press 10 times within 5 s to delete everything Token Watch has stored')
+    for (let i = 0; i < 9; i++) await pane.press({ key: 'clear-all' })
+    expect(await drawn()).toContain('"children":["[Clear all data: 1 more]"]')
+    expect(saved.get('pinned')).toEqual({ aa: NOW })
+    // 5 s after the first, the count starts over.
+    await clock.advance(5_000)
+    expect(await drawn()).toContain('"key":"clear-all","label":"[Clear all data]"')
+    await pane.press({ key: 'clear-all' })
+    expect(saved.get('pinned')).toEqual({ aa: NOW })
+    await clock.advance(5_000)
+    for (let i = 0; i < 10; i++) await pane.press({ key: 'clear-all' })
+    for (const key of ['settings', 'pinned', 'view', 'limits', 'history']) expect(saved.get(key)).toBeUndefined()
+    expect(await drawn()).toContain('"key":"clear-all","label":"[Clear all data]"')
   })
 })
 

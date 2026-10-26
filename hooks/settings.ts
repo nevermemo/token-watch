@@ -6,7 +6,26 @@
 // settings in force take the session's leaf where there is one, else the
 // global. Pure functions; the hooks module keeps and saves the trees.
 
-import type { AlertPart, BurnUnit, CapSetting, Part, SettingsOverride, SettingsTree, Ttl, UsagePart, View, WarmMode } from '../types'
+import type {
+  AlertPart,
+  BurnUnit,
+  CapSetting,
+  MonitorCurrent,
+  MonitorFilter,
+  MonitorCtxPiece,
+  MonitorName,
+  MonitorSort,
+  MonitorState,
+  MonitorTtlPiece,
+  MonitorUsagePiece,
+  Part,
+  SettingsOverride,
+  SettingsTree,
+  Ttl,
+  UsagePart,
+  View,
+  WarmMode,
+} from '../types'
 import { DEFAULT_CAPS, isCapValue, readCaps } from './cache'
 
 // The band's views, in the order the panel lists them, and the panel's names
@@ -45,9 +64,24 @@ export function stepAlert(level: number | null, by: 1 | -1) {
   return ALERT_STEPS[Math.min(ALERT_STEPS.length - 1, Math.max(0, i + by))] ?? null
 }
 
+// TW Monitor's choices, in the order the panel lists them: what a usage
+// window's line shows; what a session's context and cache show, in which
+// state; the name; the order; which sessions; and how far back "recent"
+// reaches (minutes, 5 minutes to 7 days).
+export const MONITOR_USAGE_PIECES: MonitorUsagePiece[] = ['bar', 'percent', 'reset', 'rate']
+export const MONITOR_CTX_PIECES: MonitorCtxPiece[] = ['bar', 'percent', 'tokens']
+export const MONITOR_TTL_PIECES: MonitorTtlPiece[] = ['bar', 'timer', 'warm']
+export const MONITOR_STATES: MonitorState[] = ['expanded', 'collapsed']
+export const MONITOR_NAMES: MonitorName[] = ['folder', 'title', 'both']
+export const MONITOR_SORTS: MonitorSort[] = ['name', 'context', 'expiry', 'activity']
+export const MONITOR_FILTERS: MonitorFilter[] = ['all', 'warm', 'recent']
+export const RECENT_STEPS = [5, 10, 15, 30, 60, 120, 240, 480, 720, 1440, 4320, 10080]
+export const MONITOR_CURRENT: MonitorCurrent[] = ['default', 'top']
+
 export type Path = readonly string[]
 
 const everyView = (): Record<View, boolean> => ({ plain: true, bars: true, expanded: true })
+const everyPiece = (): Record<MonitorUsagePiece, boolean> => ({ bar: true, percent: true, reset: true, rate: true })
 // The pace and its forecast, by default, only in the table, where they have
 // columns of their own.
 const expandedOnly = (): Record<View, boolean> => ({ plain: false, bars: false, expanded: true })
@@ -64,6 +98,20 @@ export const DEFAULT_SETTINGS: SettingsTree = {
   warm: { mode: 'notify', lead: { '1h': 5, '5m': 1 } },
   alert: { '5H': null, WK: null, other: null, CTX: null },
   details: { mcp: false, memory: false, skills: false },
+  // 5H and WK in full, no other windows; a session open in full, closed its
+  // countdown and keep-warm alone.
+  monitor: {
+    usage: { '5H': everyPiece(), WK: everyPiece(), other: { bar: false, percent: false, reset: false, rate: false } },
+    lines: {
+      expanded: { ctx: { bar: true, percent: true, tokens: true }, ttl: { bar: true, timer: true, warm: true } },
+      collapsed: { ctx: { bar: false, percent: false, tokens: false }, ttl: { bar: false, timer: true, warm: true } },
+    },
+    name: 'folder',
+    sort: 'name',
+    filter: 'all',
+    recentMin: 1440,
+    current: 'top',
+  },
 }
 
 const TTLS: Ttl[] = ['1h', '5m']
@@ -88,6 +136,20 @@ const LEAVES: { path: Path; isValid: (value: unknown) => boolean; isGlobalOnly?:
   { path: ['warm', 'mode'], isValid: (value: unknown) => WARM_MODES.includes(value as WarmMode) },
   ...TTLS.map(ttl => ({ path: ['warm', 'lead', ttl], isValid: (value: unknown) => NOTIFY_LEADS[ttl].includes(value as number) })),
   ...(['mcp', 'memory', 'skills'] as const).map(which => ({ path: ['details', which], isValid: isBool })),
+  // TW Monitor's, the same in every session: the settings panel's Monitor
+  // view edits them, with no session's own.
+  ...[
+    ...USAGE_PARTS.flatMap(part => MONITOR_USAGE_PIECES.map(piece => ({ path: ['monitor', 'usage', part, piece], isValid: isBool }))),
+    ...MONITOR_STATES.flatMap(state => [
+      ...MONITOR_CTX_PIECES.map(piece => ({ path: ['monitor', 'lines', state, 'ctx', piece], isValid: isBool })),
+      ...MONITOR_TTL_PIECES.map(piece => ({ path: ['monitor', 'lines', state, 'ttl', piece], isValid: isBool })),
+    ]),
+    { path: ['monitor', 'name'], isValid: (value: unknown) => MONITOR_NAMES.includes(value as MonitorName) },
+    { path: ['monitor', 'sort'], isValid: (value: unknown) => MONITOR_SORTS.includes(value as MonitorSort) },
+    { path: ['monitor', 'filter'], isValid: (value: unknown) => MONITOR_FILTERS.includes(value as MonitorFilter) },
+    { path: ['monitor', 'recentMin'], isValid: (value: unknown) => RECENT_STEPS.includes(value as number) },
+    { path: ['monitor', 'current'], isValid: (value: unknown) => MONITOR_CURRENT.includes(value as MonitorCurrent) },
+  ].map(leaf => ({ ...leaf, isGlobalOnly: true as const })),
   ...ALERT_PARTS.map(part => ({
     path: ['alert', part],
     isValid: (value: unknown) => ALERT_STEPS.includes(value as number | null),
@@ -198,6 +260,14 @@ export function forecastHiddenIn(settings: SettingsTree, view: View): Part[] {
 // Whether no view shows the cache, which keeps keep-warm off.
 export function isCacheHidden(settings: SettingsTree) {
   return VIEWS.every(v => !settings.show.TTL[v])
+}
+
+// How far back "recent" reaches, as the panel prints it: "15 min", "4 h",
+// "3 d".
+export function recentText(minutes: number) {
+  if (minutes < 60) return `${minutes} min`
+  if (minutes < 1440) return `${minutes / 60} h`
+  return `${minutes / 1440} d`
 }
 
 // An averaging window as the panel prints it: "30 min", "6 h".

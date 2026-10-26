@@ -82,6 +82,13 @@ import type {
   BandProps,
   Cap,
   ContextDetails,
+  MonitorCurrent,
+  MonitorFilter,
+  MonitorName,
+  MonitorCtxPiece,
+  MonitorTtlPiece,
+  MonitorUsagePiece,
+  MonitorSort,
   KeepWarm,
   Limit,
   Pace,
@@ -89,6 +96,7 @@ import type {
   Scope,
   SessionSnapshot,
   SettingsOverride,
+  SettingsTree,
   Slice,
   Snapshot,
   TtlInputs,
@@ -120,9 +128,19 @@ import {
 } from './cache'
 import {
   DEFAULT_SETTINGS,
+  MONITOR_CURRENT,
+  MONITOR_FILTERS,
+  MONITOR_NAMES,
+  MONITOR_CTX_PIECES,
+  MONITOR_TTL_PIECES,
+  MONITOR_USAGE_PIECES,
+  MONITOR_SORTS,
+  MONITOR_STATES,
   NOTIFY_LEADS,
   PACE_UNITS,
   PACE_WINDOWS,
+  RECENT_STEPS,
+  USAGE_PARTS,
   VIEWS,
   VIEW_NAMES,
   WARM_MODES,
@@ -139,6 +157,7 @@ import {
   paceHiddenIn,
   readOverride,
   readSettings,
+  recentText,
   setAt,
   stepAlert,
   stepIn,
@@ -169,6 +188,8 @@ const history = atom({ plugin: 'token-watch', key: 'history' } as const, {})
 const sessions = atom({ plugin: 'token-watch', key: 'sessions' } as const, [])
 const sessionsClosed = atom({ plugin: 'token-watch', key: 'sessionsClosed' } as const, [])
 const pinned = atom({ plugin: 'token-watch', key: 'pinned' } as const, {})
+const titles = atom({ plugin: 'token-watch', key: 'titles' } as const, {})
+const clearPresses = atom({ plugin: 'token-watch', key: 'clearPresses' } as const, 0)
 const hiddenSessions = atom({ plugin: 'token-watch', key: 'hiddenSessions' } as const, {})
 
 // The context's details lines, as the panel names them.
@@ -177,6 +198,29 @@ const DETAILS: ['mcp' | 'memory' | 'skills', string][] = [
   ['memory', 'Memory files'],
   ['skills', 'Skills & agents'],
 ]
+
+// TW Monitor's settings as the panel names and explains them.
+const USAGE_NAMES: Record<UsagePart, string> = { '5H': '5H', WK: 'WK', other: 'OTH' }
+const MONITOR_USAGE_NAMES: Record<MonitorUsagePiece, string> = { bar: 'Bar', percent: 'Percentage', reset: 'Reset timer', rate: 'Burn rate' }
+const MONITOR_CTX_NAMES: Record<MonitorCtxPiece, string> = { bar: 'Bar', percent: 'Percentage', tokens: 'Tokens' }
+const MONITOR_TTL_NAMES: Record<MonitorTtlPiece, string> = { bar: 'Bar', timer: 'Timer', warm: 'Keep-warm' }
+const MONITOR_NAME_NAMES: Record<MonitorName, string> = { folder: 'Folder', title: 'Title', both: 'Folder / title' }
+const MONITOR_SORT_NAMES: Record<MonitorSort, string> = { name: 'Name', context: 'Context', expiry: 'Cache expiry', activity: 'Last activity' }
+const MONITOR_FILTER_NAMES: Record<MonitorFilter, string> = { all: 'All', warm: 'Warm cache', recent: 'Recent' }
+const MONITOR_FILTER_NOTES: Record<MonitorFilter, string> = {
+  all: 'Every session running on this device.',
+  warm: 'Sessions whose prompt cache is warm, or running a turn.',
+  recent: 'Sessions that answered within this time, or are running a turn.',
+}
+const MONITOR_CURRENT_NAMES: Record<MonitorCurrent, string> = { default: 'Default', top: 'On top' }
+const MONITOR_CURRENT_NOTES: Record<MonitorCurrent, string> = {
+  default: 'This session follows the pins, Hidden and the order like any other.',
+  top: 'This session comes first, and is never hidden here.',
+}
+
+// Keep-warm's mode as TW Monitor notes it after a session's countdown, while
+// keep-warm is on.
+const MONITOR_WARM_NOTES: Record<WarmMode, string> = { pings: '(Ping)', notify: '(Notify)', both: '(Ping + Notify)' }
 
 // Keep-warm's modes as the panel names and explains them.
 const WARM_MODE_NAMES: Record<WarmMode, string> = { pings: 'Pings', notify: 'Notify', both: 'Both' }
@@ -217,6 +261,11 @@ const THIS_SESSION = '›'
 const MARKS = { pinned: 'pinned', hidden: 'hiddenSessions' } as const
 type Mark = keyof typeof MARKS
 
+// "Clear all data": how many presses it takes, and within how long of the
+// first.
+const CLEAR_PRESSES = 10
+const CLEAR_WINDOW_MS = 5_000
+
 // TW Monitor's sections that start closed.
 const CLOSED_FIRST = new Set(['hidden'])
 
@@ -226,8 +275,13 @@ const CLOSED_FIRST = new Set(['hidden'])
 const PIN_WIDTH_TERMINAL = 3
 const PIN_WIDTH_DESKTOP = 2
 
-// A piece of a closed section's summary: in its colour, or dim without one.
-type SummaryPart = { text: string; color?: string }
+// A piece of a closed section's summary: text in its colour (dim without
+// one), or a short meter filled to a share.
+type SummaryPart = { text: string; color?: string } | { meter: number; color: string }
+
+// A closed session's meters, shorter than its lines'.
+const SUMMARY_METER = 5
+
 const SESSION_VALUE_WIDTH = 'No data'.length + 1
 const SESSION_NOTE_WIDTH = '23h 59m'.length + 1
 
@@ -269,6 +323,13 @@ const SNAPSHOT_PARTS = ['.claude', 'token-watch', 'usage.json']
 // gone stale (no file is ever deleted), so the folder holds as many files as
 // sessions ever ran at once.
 const SESSIONS_PARTS = ['.claude', 'token-watch', 'sessions']
+// Where Claude Code keeps the transcripts, read for sessions' titles; the
+// most $.fs.read takes; and, for a larger transcript, git grep's pattern for
+// a title (a JSON string, escapes and all) and how long it may take.
+const PROJECTS_PARTS = ['.claude', 'projects']
+const FS_READ_MAX = 4 * 1024 * 1024
+const TITLE_PATTERN = '"customTitle":"(\\\\.|[^"])*"'
+const GREP_TIMEOUT_MS = 10_000
 const SLOT_NAME = /^session-(\d+)\.json$/
 const HEARTBEAT_MS = 30_000
 const SNAPSHOT_FRESH_MS = 120_000
@@ -309,7 +370,7 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'token-watch',
       description:
-        'Show or hide the Token Watch band (plan usage, context and the prompt cache countdown) above the prompt; right-click it to cycle its views; "text" for the reading as a line, "file" for the usage snapshot, "settings" for TW Settings, "monitor" for TW Monitor (every session\'s context and cache)',
+        'Show or hide the Token Watch banner (plan usage, context and the prompt cache countdown) above the prompt; right-click it to cycle its views; "text" for the reading as a line, "file" for the usage snapshot, "settings" for TW Settings, "monitor" for TW Monitor (every session\'s context and cache)',
       argumentHint: '[text|file|settings|monitor]',
     })
     const shown = await $.store.get('isShown')
@@ -319,6 +380,9 @@ export const register: Register = (on, options) => {
     await tick($)
     await pruneSessionSettings($)
     await loadSettings($, true)
+    await setMarks($, 'pinned', readMarks(await $.store.get(MARKS.pinned)))
+    await setMarks($, 'hidden', readMarks(await $.store.get(MARKS.hidden)))
+    await setTitles($, readTitleStore(await $.store.get('titles')))
     const keptHistory = readHistory(await $.store.get('history'))
     await update($, history, () => keptHistory)
     // A new session has no usage windows until its first response, so start
@@ -543,7 +607,11 @@ export const register: Register = (on, options) => {
     const checkbox = (key: string, label: string, isOn: boolean, onPress: () => void) => pick(key, mark(isOn), label, onPress)
     const radio = (key: string, label: string, isOn: boolean, onPress: () => void) => pick(key, choice(isOn), label, onPress)
     const isGlobal = await editsGlobal($)
+    const isMonitor = (await read($, scope)) === 'monitor'
     const hasSession = (await sessionKey($)) !== null
+    const presses = await read($, clearPresses)
+    const pinsNow = await read($, pinned)
+    const hiddenNow = await read($, hiddenSessions)
     const own = await read($, override)
     // What each leaf reads in the scope shown.
     const shown = isGlobal ? await read($, globalSettings) : await read($, settings)
@@ -656,7 +724,7 @@ export const register: Register = (on, options) => {
       const id = `usage-${part}`
       return section(id, name, () => (
         <Box flexDirection="column">
-          {views(`${id}-show`, 'Show on band', ['show', part], `show-${part}`)}
+          {views(`${id}-show`, 'Show on banner', ['show', part], `show-${part}`)}
           {alerts(`${id}-alert`, part)}
           {section(
             `${id}-pace`,
@@ -691,55 +759,183 @@ export const register: Register = (on, options) => {
         </Box>
       ))
     }
-    return (
-      <Box flexDirection="column" rowGap={1} paddingX={1}>
-        {hasSession && (
-          <Box flexDirection="column">
-            <Box flexDirection="row" columnGap={1} flexWrap="wrap">
-              {radio('scope-session', 'This session', !isGlobal, () => void setScope($, 'session'))}
-              {radio('scope-global', 'All sessions', isGlobal, () => void setScope($, 'global'))}
-            </Box>
-            <Text dimColor wrap="wrap">
-              {isGlobal
-                ? 'Changes apply to every session, except where one has its own setting.'
-                : 'Changes apply to this session only, over the settings for all sessions.'}
-            </Text>
-            {/* In this session's scope, every setting of its own back to the
-                settings for all sessions; in every session's, those back to
-                the defaults. Dim with nothing to reset. */}
-            <Box flexDirection="row">
-              {isGlobal ? (
-                <Button
-                  key="reset-defaults"
-                  plain
-                  dimColor={JSON.stringify(shown) === JSON.stringify(DEFAULT_SETTINGS)}
-                  onPress={() => void resetDefaults($)}
-                >
-                  {wrap('Reset to defaults')}
-                </Button>
-              ) : (
-                <Button
-                  key="reset-session"
-                  plain
-                  dimColor={isEmptyOverride(own)}
-                  onPress={() => void resetSession($)}
-                >
-                  {wrap('Reset this session')}
-                </Button>
-              )}
-            </Box>
+    // The Monitor view: TW Monitor's settings, the same in every session (no
+    // session has its own), in collapsible rows; then the pins' and hidden
+    // sessions' resets.
+    const mon = shown.monitor
+    const groupWidth = 'TTL:'.length + (isTerminal ? 0 : 1)
+    const choices = <T extends string>(key: string, list: T[], names: Record<T, string>, at: T, pick: (value: T) => void) => (
+      <Box flexDirection="row" columnGap={1} flexWrap="wrap">
+        {list.map(value => radio(`${key}-${value}`, names[value], at === value, () => pick(value)))}
+      </Box>
+    )
+    const note = (text: string) => (
+      <Text dimColor wrap="wrap">
+        {text}
+      </Text>
+    )
+    // A group's pieces as checkboxes, after its label where it has one.
+    const pieces = <T extends string>(key: string, label: string | null, list: T[], names: Record<T, string>, values: Record<T, boolean>, path: Path) => (
+      <Box key={key} flexDirection="row" columnGap={1}>
+        {label !== null && (
+          <Box width={groupWidth} flexShrink={0}>
+            <Text>{label}</Text>
           </Box>
         )}
-        {section('usage', 'Usage', () => (
+        <Box flexDirection="row" columnGap={1} flexWrap="wrap" flexShrink={1} minWidth={0}>
+          {list.map(piece => checkbox(`${key}-${piece}`, names[piece], values[piece], () => void setSetting($, [...path, piece], !values[piece])))}
+        </Box>
+      </Box>
+    )
+    const monitorView = () => (
+      <Box flexDirection="column">
+        {section('monitor-usage', 'Usage', () => (
+          <Box flexDirection="column">
+            {USAGE_PARTS.map(part =>
+              section(
+                `monitor-usage-${part}`,
+                USAGE_NAMES[part],
+                () => pieces(`monitor-usage-${part}`, null, MONITOR_USAGE_PIECES, MONITOR_USAGE_NAMES, mon.usage[part], ['monitor', 'usage', part]),
+                { isSub: true },
+              ),
+            )}
+            {note('A window with nothing on is left out, and the section with every window so.')}
+          </Box>
+        ))}
+        {section('monitor-lines', 'Session lines', () => (
+          <Box flexDirection="column">
+            {MONITOR_STATES.map(state =>
+              section(
+                `monitor-lines-${state}`,
+                state === 'expanded' ? 'Expanded' : 'Collapsed',
+                () => (
+                  <Box flexDirection="column">
+                    {pieces(`monitor-lines-${state}-ctx`, 'CTX:', MONITOR_CTX_PIECES, MONITOR_CTX_NAMES, mon.lines[state].ctx, ['monitor', 'lines', state, 'ctx'])}
+                    {pieces(`monitor-lines-${state}-ttl`, 'TTL:', MONITOR_TTL_PIECES, MONITOR_TTL_NAMES, mon.lines[state].ttl, ['monitor', 'lines', state, 'ttl'])}
+                  </Box>
+                ),
+                { isSub: true },
+              ),
+            )}
+            {note('A line with nothing on is left out.')}
+          </Box>
+        ))}
+        {section('monitor-name', 'Name', () => (
+          <Box flexDirection="column">
+            {choices('monitor-name', MONITOR_NAMES, MONITOR_NAME_NAMES, mon.name, value =>
+              void setSetting($, ['monitor', 'name'], value).then(() => (value === 'folder' ? undefined : rereadTitles($))),
+            )}
+            {note('A title is read from its session\'s transcript when the session is listed, and again for every session when Title or Folder / title is pressed.')}
+          </Box>
+        ))}
+        {section('monitor-sort', 'Sort', () => (
+          <Box flexDirection="column">
+            {choices('monitor-sort', MONITOR_SORTS, MONITOR_SORT_NAMES, mon.sort, value => void setSetting($, ['monitor', 'sort'], value))}
+            {note('Pinned sessions come first either way.')}
+          </Box>
+        ))}
+        {section('monitor-filter', 'Show', () => (
+          <Box flexDirection="column">
+            {choices('monitor-filter', MONITOR_FILTERS, MONITOR_FILTER_NAMES, mon.filter, value => void setSetting($, ['monitor', 'filter'], value))}
+            {mon.filter === 'recent' &&
+              stepper(
+                'recent',
+                'Within:',
+                paceWidth,
+                recentText(mon.recentMin),
+                mon.recentMin <= RECENT_STEPS[0]!,
+                mon.recentMin >= RECENT_STEPS[RECENT_STEPS.length - 1]!,
+                by => void setSetting($, ['monitor', 'recentMin'], stepIn(RECENT_STEPS, mon.recentMin, by)),
+                ['monitor', 'recentMin'],
+              )}
+            {note(MONITOR_FILTER_NOTES[mon.filter])}
+          </Box>
+        ))}
+        {section('monitor-current', 'Current session', () => (
+          <Box flexDirection="column">
+            {choices('monitor-current', MONITOR_CURRENT, MONITOR_CURRENT_NAMES, mon.current, value => void setSetting($, ['monitor', 'current'], value))}
+            {note(MONITOR_CURRENT_NOTES[mon.current])}
+          </Box>
+        ))}
+      </Box>
+    )
+    // Under the settings, each dim with nothing to undo: in this session's
+    // view, its own settings back to the global ones; in the global view,
+    // those back to the defaults; in the Monitor view, TW Monitor's back to
+    // the defaults, and every pin and hidden session undone.
+    const resets = () => (
+      <Box flexDirection="row" columnGap={1} flexWrap="wrap">
+        {isMonitor ? (
+          <Button key="reset-monitor" plain dimColor={JSON.stringify(mon) === JSON.stringify(DEFAULT_SETTINGS.monitor) || undefined} onPress={() => void resetMonitor($)}>
+            {wrap('Reset to default')}
+          </Button>
+        ) : isGlobal ? (
+          <Button key="reset-defaults" plain dimColor={isDefault(shown) || undefined} onPress={() => void resetDefaults($)}>
+            {wrap('Reset to defaults')}
+          </Button>
+        ) : (
+          <Button key="reset-session" plain dimColor={isEmptyOverride(own) || undefined} onPress={() => void resetSession($)}>
+            {wrap('Reset to global')}
+          </Button>
+        )}
+        {isMonitor && (
+          <Button key="unpin-all" plain dimColor={Object.keys(pinsNow).length === 0 || undefined} onPress={() => void clearMarks($, 'pinned')}>
+            {wrap('Unpin all sessions')}
+          </Button>
+        )}
+        {isMonitor && (
+          <Button key="restore-all" plain dimColor={Object.keys(hiddenNow).length === 0 || undefined} onPress={() => void clearMarks($, 'hidden')}>
+            {wrap('Unhide all sessions')}
+          </Button>
+        )}
+      </Box>
+    )
+    // Below everything in the global view: Clear all data, which takes
+    // CLEAR_PRESSES presses within CLEAR_WINDOW_MS, counting them down, so
+    // one press by mistake clears nothing. The note under it says so (no
+    // tooltips for a Button).
+    const left = CLEAR_PRESSES - presses
+    const clear = () => (
+      <Box flexDirection="column">
+        <Box flexDirection="row">
+          <Button key="clear-all" plain onPress={() => void pressClear($)}>
+            {presses === 0 ? wrap('Clear all data') : <Text color={SESSION_COLD}>{wrap(`Clear all data: ${left} more`)}</Text>}
+          </Button>
+        </Box>
+        <Text dimColor wrap="wrap">
+          {`Press ${CLEAR_PRESSES} times within ${CLEAR_WINDOW_MS / 1000} s to delete everything Token Watch has stored: settings, pins, hidden sessions, titles and usage history.`}
+        </Text>
+      </Box>
+    )
+    return (
+      <Box flexDirection="column" rowGap={1} paddingX={1}>
+        {/* Which settings the panel shows: this session's own (where it has
+            a session), every session's, or TW Monitor's. */}
+        <Box flexDirection="column">
+          <Box flexDirection="row" columnGap={1} flexWrap="wrap">
+            {hasSession && radio('scope-session', 'Session', !isGlobal && !isMonitor, () => void setScope($, 'session'))}
+            {radio('scope-global', 'Global', isGlobal && !isMonitor, () => void setScope($, 'global'))}
+            {radio('scope-monitor', 'Monitor', isMonitor, () => void setScope($, 'monitor'))}
+          </Box>
+          <Text dimColor wrap="wrap">
+            {isMonitor
+              ? "TW Monitor's settings, the same in every session."
+              : isGlobal
+                ? 'Changes apply to every session, except where one has its own setting.'
+                : 'Changes apply to this session only, over the global settings.'}
+          </Text>
+        </Box>
+        {isMonitor && monitorView()}
+        {!isMonitor && section('usage', 'Usage', () => (
           <Box flexDirection="column">
             {usage('5H', '5H')}
             {usage('WK', 'WK')}
             {usage('other', 'OTH')}
           </Box>
         ))}
-        {section('context', 'Context', () => (
+        {!isMonitor && section('context', 'Context', () => (
           <Box flexDirection="column">
-            {views('context-show', 'Show on band', ['show', 'CTX'], 'show-CTX')}
+            {views('context-show', 'Show on banner', ['show', 'CTX'], 'show-CTX')}
             {alerts('context-alert', 'CTX')}
             {section(
               'context-details',
@@ -761,11 +957,11 @@ export const register: Register = (on, options) => {
             )}
           </Box>
         ))}
-        {section('cache', 'Cache time', () => (
+        {!isMonitor && section('cache', 'Cache time', () => (
           <Box flexDirection="column">
             {section(
               'cache-show',
-              'Show on band',
+              'Show on banner',
               () => (
                 <Box flexDirection="column">
                   {viewChoices(['show', 'TTL'], 'show-TTL')}
@@ -832,9 +1028,13 @@ export const register: Register = (on, options) => {
             )}
           </Box>
         ))}
+        {resets()}
         <Text dimColor wrap="wrap">
-          A pace is averaged over its window, once that holds 5 minutes of readings. /token-watch settings opens this panel again.
+          {isMonitor
+            ? '/token-watch monitor opens TW Monitor; /token-watch settings opens this panel again.'
+            : 'A pace is averaged over its window, once that holds 5 minutes of readings. /token-watch settings opens this panel again.'}
         </Text>
+        {isGlobal && !isMonitor && clear()}
       </Box>
     )
   })
@@ -892,17 +1092,34 @@ export const register: Register = (on, options) => {
                 </Text>
               </Box>
             )}
-            {!isOpen && (
-              <Box flexShrink={1} minWidth={0}>
-                <Text wrap="truncate">
-                  {summary.map((part, n) => (
-                    <Text key={String(n)} color={part.color} dimColor={part.color === undefined || undefined}>
-                      {part.text}
-                    </Text>
-                  ))}
-                </Text>
-              </Box>
-            )}
+            {!isOpen &&
+              (summary.some(part => 'meter' in part) ? (
+                <Box flexDirection="row" flexShrink={1} minWidth={0}>
+                  {summary.map((part, n) =>
+                    'meter' in part ? (
+                      <Box key={String(n)} flexShrink={0}>
+                        {meter(part.meter, part.color, SUMMARY_METER)}
+                      </Box>
+                    ) : (
+                      <Text key={String(n)} color={part.color} dimColor={part.color === undefined || undefined} wrap="truncate">
+                        {part.text}
+                      </Text>
+                    ),
+                  )}
+                </Box>
+              ) : (
+                <Box flexShrink={1} minWidth={0}>
+                  <Text wrap="truncate">
+                    {summary.map((part, n) =>
+                      'meter' in part ? null : (
+                        <Text key={String(n)} color={part.color} dimColor={part.color === undefined || undefined}>
+                          {part.text}
+                        </Text>
+                      ),
+                    )}
+                  </Text>
+                </Box>
+              ))}
             {/* No fragment: the engine lays a fragment's children out as a
                 column. */}
             {actions !== null && <Box flexGrow={1} />}
@@ -929,19 +1146,75 @@ export const register: Register = (on, options) => {
         </Box>
       )
     const now = await read($, nowMs)
+    const m = (await read($, settings)).monitor
     const own = await sessionSnapshotOf($, now, null)
-    // This session first, then the pinned ones, then the rest, each by
-    // folder; the hidden ones in their own section, pinned first too. This
-    // session is never hidden in its own panel: hiding it hides it from the
-    // other sessions' panels.
+    const names = await read($, titles)
     const pins = await read($, pinned)
     const hides = await read($, hiddenSessions)
     const isPinned = (s: SessionSnapshot) => s.session.id !== null && s.session.id in pins
     const isHidden = (s: SessionSnapshot) => s.session.id !== null && s.session.id in hides
-    const byPin = (list: SessionSnapshot[]) => [...list.filter(isPinned), ...list.filter(s => !isPinned(s))]
+    // A session's name by the Name setting: its folder, its title (else its
+    // folder), or both.
+    const nameOf = (s: SessionSnapshot) => {
+      const folder = folderOf(projectOf(s))
+      const title = s.session.id === null ? null : (names[s.session.id] ?? null)
+      if (m.name === 'title') return title ?? folder
+      if (m.name === 'both' && title !== null) return `${folder} / ${title}`
+      return folder
+    }
+    // When a session's cache expires: the whole TTL on while a turn runs;
+    // null when cold or unknown.
+    const expiresOf = (s: SessionSnapshot) => {
+      if (s.isWorking) return now + TTL_MS[s.cache.ttl]
+      const at = s.cache.expiresAt === null ? NaN : Date.parse(s.cache.expiresAt)
+      return Number.isNaN(at) || at <= now ? null : at
+    }
+    // When it last answered: now while a turn runs; null before its first.
+    const activeOf = (s: SessionSnapshot) => {
+      if (s.isWorking) return now
+      const at = s.lastActiveAt ? Date.parse(s.lastActiveAt) : NaN
+      return Number.isNaN(at) ? null : at
+    }
+    // Which sessions the Show setting lists: all; those with a warm cache; or
+    // those that answered within its time.
+    const isListed = (s: SessionSnapshot) => {
+      if (m.filter === 'warm') return expiresOf(s) !== null
+      if (m.filter === 'recent') {
+        const at = activeOf(s)
+        return at !== null && now - at <= m.recentMin * 60_000
+      }
+      return true
+    }
+    // The Sort setting's order: by name; by context, fullest first; by when
+    // the cache expires, soonest first; or by last activity, latest first.
+    // Without the figure, last; the name breaks ties. Pinned ones first.
+    const keyOf = (s: SessionSnapshot): number | null => {
+      if (m.sort === 'context') return s.context === null ? null : -s.context.percent
+      if (m.sort === 'expiry') return expiresOf(s)
+      if (m.sort === 'activity') {
+        const at = activeOf(s)
+        return at === null ? null : -at
+      }
+      return 0
+    }
+    const group = (list: SessionSnapshot[]) => {
+      const ordered = [...list].sort((a, b) => {
+        const ka = keyOf(a)
+        const kb = keyOf(b)
+        const byKey = ka === kb ? 0 : ka === null ? 1 : kb === null ? -1 : ka - kb
+        return byKey || nameOf(a).localeCompare(nameOf(b)) || (a.session.id ?? '').localeCompare(b.session.id ?? '')
+      })
+      return [...ordered.filter(isPinned), ...ordered.filter(s => !isPinned(s))]
+    }
+    // This session on top (by the Current session setting), never hidden
+    // here, whatever the filter: hiding it hides it from the other sessions'
+    // panels. Or as any other: by the pins, Hidden and the order, though
+    // always listed, the filter aside.
     const others = await read($, sessions)
-    const all = [own, ...byPin(others.filter(s => !isHidden(s)))]
-    const tucked = byPin(others.filter(isHidden))
+    const isOnTop = m.current === 'top'
+    const pool = (isOnTop ? others : [own, ...others]).filter(s => s === own || isListed(s))
+    const all = isOnTop ? [own, ...group(pool.filter(s => !isHidden(s)))] : group(pool.filter(s => !isHidden(s)))
+    const tucked = group(pool.filter(isHidden))
     const everyone = [...all, ...tucked]
     // A session's pin, before its heading where the indent under Sessions
     // was, dim until pinned: a flag, ⚐ / ⚑, on the desktop, one shape
@@ -965,7 +1238,7 @@ export const register: Register = (on, options) => {
     }
     // Its hide, at the row's right edge, dim: × dismisses it to Hidden, ↺
     // restores it to Sessions; bracketed in a terminal, as the pin is. This
-    // session has one too: it hides it from the other sessions' panels.
+    // session has one too.
     const hide = (s: SessionSnapshot) => {
       const id = s.session.id
       if (id === null) return null
@@ -978,34 +1251,48 @@ export const register: Register = (on, options) => {
         </Box>
       )
     }
+    // The panel's refresh, at its first heading's right edge, dim: the
+    // sessions' files read again now, rather than at the next 30 s tick.
+    const refresh = (
+      <Box flexShrink={0}>
+        <Button key="refresh" plain dimColor onPress={() => void refreshMonitor($)}>
+          {isTerminal ? '[↻]' : '↻'}
+        </Button>
+      </Box>
+    )
     const windows = sorted(current(await read($, limits), now))
     const pace = await paceOf($, windows, now)
+    // The usage windows the Usage setting leaves something on for; with
+    // none, no Usage section, and no line under it.
+    const usageOf = (w: Limit) => m.usage[partOf(w)]
+    const shownWindows = windows.filter(w => Object.values(usageOf(w)).some(Boolean))
+    const hasUsage = shownWindows.length > 0
     // The desktop's font is proportional: two cells of slack, as the band keeps.
     const labelWidth = SESSION_LABEL_WIDTH + (isTerminal ? 0 : 2)
-    // A folder two sessions share is told apart by the session's id.
-    const folders = everyone.map(s => folderOf(projectOf(s)))
-    const meter = (fraction: number, color: string) => {
-      const filled = Math.round(Math.min(1, Math.max(0, fraction)) * SESSION_METER)
+    // A name two sessions share is told apart by the session's id.
+    const labels = everyone.map(nameOf)
+    const meter = (fraction: number, color: string, cells = SESSION_METER) => {
+      const filled = Math.round(Math.min(1, Math.max(0, fraction)) * cells)
       if (isTerminal) {
         return (
           <Box flexDirection="row" flexShrink={0}>
             <Text color={color}>{SESSION_GLYPH.repeat(filled)}</Text>
-            <Text color={SESSION_TRACK}>{SESSION_GLYPH.repeat(SESSION_METER - filled)}</Text>
+            <Text color={SESSION_TRACK}>{SESSION_GLYPH.repeat(cells - filled)}</Text>
           </Box>
         )
       }
       return (
-        <Box flexDirection="row" width={SESSION_METER} height={1} alignItems="center" flexShrink={0}>
+        <Box flexDirection="row" width={cells} height={1} alignItems="center" flexShrink={0}>
           {filled > 0 && <Box width={filled} height="60%" backgroundColor={color} />}
-          {filled < SESSION_METER && <Box width={SESSION_METER - filled} height="60%" backgroundColor={SESSION_TRACK} />}
+          {filled < cells && <Box width={cells - filled} height="60%" backgroundColor={SESSION_TRACK} />}
         </Box>
       )
     }
     // A figure's line, in columns that line up from one session to the
-    // next: label, meter, value, note.
-    // A usage window's line adds its burn rate after the note, which then
-    // keeps a column of its own: green while the window resets before it
-    // fills, red once it would fill first.
+    // next: label, meter (unless `hasMeter` is false), value (unless
+    // `hasValue` is), note. A usage window's line adds its burn rate after
+    // the note, which then keeps a column of its own: green while the window
+    // resets before it fills, red once it would fill first.
     const line = (
       title: string,
       fraction: number,
@@ -1014,6 +1301,8 @@ export const register: Register = (on, options) => {
       color: string | undefined,
       note: string | null,
       rate: { text: string; color: string } | null = null,
+      hasMeter = true,
+      hasValue = true,
     ) => (
       <Box key={title} flexDirection="row" columnGap={1}>
         <Box width={labelWidth} flexShrink={0}>
@@ -1021,12 +1310,14 @@ export const register: Register = (on, options) => {
             {title}
           </Text>
         </Box>
-        {meter(fraction, fill)}
-        <Box width={SESSION_VALUE_WIDTH} flexShrink={0}>
-          <Text color={color} dimColor={color === undefined || undefined} wrap="truncate">
-            {value}
-          </Text>
-        </Box>
+        {hasMeter && meter(fraction, fill)}
+        {hasValue && (
+          <Box width={SESSION_VALUE_WIDTH} flexShrink={0}>
+            <Text color={color} dimColor={color === undefined || undefined} wrap="truncate">
+              {value}
+            </Text>
+          </Box>
+        )}
         {note !== null && (
           <Box {...(rate === null ? { flexShrink: 1, minWidth: 0 } : { width: SESSION_NOTE_WIDTH, flexShrink: 0 })}>
             <Text dimColor wrap="truncate">
@@ -1044,8 +1335,8 @@ export const register: Register = (on, options) => {
       </Box>
     )
     const row = (s: SessionSnapshot, i: number) => {
-      const folder = folders[i]!
-      const isShared = folders.filter(f => f === folder).length > 1
+      const name = labels[i]!
+      const isShared = labels.filter(l => l === name).length > 1
       const ttlMs = TTL_MS[s.cache.ttl]
       const expires = s.cache.expiresAt === null ? null : Date.parse(s.cache.expiresAt)
       // A turn running refreshes the cache with each request: the whole TTL.
@@ -1054,42 +1345,72 @@ export const register: Register = (on, options) => {
       // The countdown red with no data or once cold, else green while
       // keep-warm runs and grey without (its meter's fill a light grey).
       const ttlColor = left === null || left <= 0 ? SESSION_COLD : s.cache.keepWarm.on ? SESSION_WARM : undefined
-      // Closed: the context in its level's colour, the countdown in its own.
-      const summary: SummaryPart[] = [
-        ...(s.context === null
+      const tokens = s.context === null ? null : `${short(s.context.total)} / ${short(s.context.window)}`
+      const warmNote = s.cache.keepWarm.on ? MONITOR_WARM_NOTES[s.cache.keepWarm.mode] : null
+      // Closed: what the Session lines setting picks for a closed session,
+      // the figures in their colours: a group's label, then the pieces on, a
+      // space between; nothing for a group with none.
+      const shut = m.lines.collapsed
+      const summaryOf = (title: string, pieces: SummaryPart[][]) => {
+        const lit = pieces.filter(piece => piece.length > 0)
+        return lit.length === 0 ? [] : [{ text: `${title} ` }, ...lit.flatMap((piece, n) => (n > 0 ? [{ text: ' ' }, ...piece] : piece))]
+      }
+      const ctxParts: SummaryPart[] =
+        s.context === null
           ? []
-          : [{ text: 'CTX ' }, { text: `${s.context.percent}%`, color: levelColor(s.context.percent) }, { text: ' \u00b7 ' }]),
-        { text: 'TTL ' },
-        { text: ttlText, color: ttlColor },
-      ]
+          : summaryOf('CTX', [
+              shut.ctx.bar ? [{ meter: s.context.percent / 100, color: levelColor(s.context.percent) }] : [],
+              shut.ctx.percent ? [{ text: `${s.context.percent}%`, color: levelColor(s.context.percent) }] : [],
+              shut.ctx.tokens && tokens !== null ? [{ text: tokens }] : [],
+            ])
+      const ttlParts: SummaryPart[] = summaryOf('TTL', [
+        shut.ttl.bar ? [{ meter: left === null ? 0 : left / ttlMs, color: ttlColor ?? SESSION_IDLE }] : [],
+        shut.ttl.timer ? [{ text: ttlText, color: ttlColor }] : [],
+        shut.ttl.warm && warmNote !== null ? [{ text: warmNote }] : [],
+      ])
+      const summary = [...ctxParts, ...(ctxParts.length > 0 && ttlParts.length > 0 ? [{ text: ' · ' }] : []), ...ttlParts]
       const notes = [
         isShared && s.session.id !== null ? s.session.id.slice(0, 8) : null,
         s.isWorking ? 'working' : null,
       ].filter((note): note is string => note !== null)
+      // Open: the lines the Session lines setting picks for an open session;
+      // a line with none of its pieces on left out.
+      const open = m.lines.expanded
+      const hasCtx = Object.values(open.ctx).some(Boolean)
+      const hasTtl = Object.values(open.ttl).some(Boolean)
       return fold(
         `session-${s.session.id ?? i}`,
-        // This session, first, is marked by a › before its name.
-        i === 0 ? `${THIS_SESSION} ${folder}` : folder,
+        // This session is marked by a › before its name.
+        s === own ? `${THIS_SESSION} ${name}` : name,
         notes,
         summary,
-        () => [
-          line(
-            'CTX',
-            s.context === null ? 0 : s.context.percent / 100,
-            s.context === null ? SESSION_TRACK : levelColor(s.context.percent),
-            s.context === null ? 'No data' : `${s.context.percent}%`,
-            s.context === null ? undefined : levelColor(s.context.percent),
-            s.context === null ? null : `${short(s.context.total)} / ${short(s.context.window)}`,
-          ),
-          line(
-            'TTL',
-            left === null ? 0 : left / ttlMs,
-            ttlColor ?? SESSION_IDLE,
-            ttlText,
-            ttlColor,
-            s.cache.keepWarm.on ? `keep-warm: ${WARM_MODE_NAMES[s.cache.keepWarm.mode]}` : null,
-          ),
-        ],
+        () =>
+          [
+            hasCtx &&
+              line(
+                'CTX',
+                s.context === null ? 0 : s.context.percent / 100,
+                s.context === null ? SESSION_TRACK : levelColor(s.context.percent),
+                s.context === null ? 'No data' : `${s.context.percent}%`,
+                s.context === null ? undefined : levelColor(s.context.percent),
+                open.ctx.tokens ? tokens : null,
+                null,
+                open.ctx.bar,
+                open.ctx.percent,
+              ),
+            hasTtl &&
+              line(
+                'TTL',
+                left === null ? 0 : left / ttlMs,
+                ttlColor ?? SESSION_IDLE,
+                ttlText,
+                ttlColor,
+                open.ttl.warm ? warmNote : null,
+                null,
+                open.ttl.bar,
+                open.ttl.timer,
+              ),
+          ].filter(Boolean),
         // Its lines indented under its heading, past the pin's column.
         { lead: pin(s), actions: hide(s), indent: pinWidth + (isTerminal ? 1 : 0) + 2 },
       )
@@ -1101,31 +1422,35 @@ export const register: Register = (on, options) => {
     return (
       <Box flexDirection="column" rowGap={1} paddingX={1}>
         {/* The usage windows are the account's, the same in every session:
-            once, on top, each with the time until it resets and its burn
-            rate. */}
-        {windows.length > 0 &&
+            once, on top, each with what the Usage setting picks of its bar,
+            percentage, time until it resets and burn rate. */}
+        {hasUsage &&
           fold(
             'usage',
             'Usage',
             [],
-            windows.flatMap((w, n) => [
-              { text: `${n > 0 ? ' \u00b7 ' : ''}${label(w)} ` },
+            shownWindows.flatMap((w, n) => [
+              { text: `${n > 0 ? ' · ' : ''}${label(w)} ` },
               { text: `${Math.round(w.percentUsed)}%`, color: levelColor(w.percentUsed) },
             ]),
             () =>
-              windows.map(w =>
-                line(
+              shownWindows.map(w => {
+                const u = usageOf(w)
+                return line(
                   label(w),
                   w.percentUsed / 100,
                   levelColor(w.percentUsed),
                   `${Math.round(w.percentUsed)}%`,
                   levelColor(w.percentUsed),
-                  countdown(w.resetsAt, now) || null,
-                  usageRate(w),
-                ),
-              ),
+                  u.reset ? countdown(w.resetsAt, now) || null : null,
+                  u.rate ? usageRate(w) : null,
+                  u.bar,
+                  u.percent,
+                )
+              }),
+            { actions: refresh },
           )}
-        {windows.length > 0 && rule()}
+        {hasUsage && rule()}
         {/* Not indented: each session's pin takes the indent's place. */}
         {fold(
           'sessions',
@@ -1137,7 +1462,7 @@ export const register: Register = (on, options) => {
               {all.map(row)}
             </Box>
           ),
-          { indent: 0 },
+          { indent: 0, ...(hasUsage ? {} : { actions: refresh }) },
         )}
         {/* The sessions dismissed out of the way, under Sessions: closed at
             first, and there with none in it too. */}
@@ -1540,6 +1865,47 @@ async function setMarks($: EngineInterface, mark: Mark, next: Record<string, num
   }
 }
 
+// Every session unpinned, or every hidden one restored.
+async function clearMarks($: EngineInterface, mark: Mark) {
+  await $.store.set(MARKS[mark], {})
+  await setMarks($, mark, {})
+}
+
+// "Clear all data" pressed: one more press counted, the count starting
+// over CLEAR_WINDOW_MS after the first; the last of CLEAR_PRESSES clears.
+async function pressClear($: EngineInterface) {
+  const count = (await read($, clearPresses)) + 1
+  if (count >= CLEAR_PRESSES) return clearAll($)
+  if (count === 1) $.clock.after(CLEAR_WINDOW_MS, () => void update($, clearPresses, () => 0).catch(() => {}))
+  await update($, clearPresses, () => count)
+}
+
+// TW Monitor's settings back to the defaults, for every session.
+async function resetMonitor($: EngineInterface) {
+  const next = setAt(await read($, globalSettings), ['monitor'], DEFAULT_SETTINGS.monitor)
+  await update($, globalSettings, () => next)
+  await $.store.set('settings', next)
+  await applySettings($)
+}
+
+// Every key in the store deleted: the settings (the global ones and every
+// session's own), the pins, hidden sessions and titles, the usage windows'
+// history and alert records, the view and whether the band shows. As a fresh
+// install; the other sessions take the defaults at their next 30 s tick. The
+// sessions' files stay (nothing can delete them) and go stale on their own.
+async function clearAll($: EngineInterface) {
+  for (const key of await $.store.keys()) await $.store.delete(key)
+  await update($, clearPresses, () => 0)
+  await setMarks($, 'pinned', {})
+  await setMarks($, 'hidden', {})
+  await setTitles($, {})
+  await update($, history, () => ({}))
+  await update($, ctxAlerted, () => [])
+  await update($, view, () => 'expanded')
+  await update($, isShown, () => true)
+  await loadSettings($)
+}
+
 // A mark as the store keeps it: ids and when each was set.
 function readMarks(value: unknown): Record<string, number> {
   if (typeof value !== 'object' || value === null) return {}
@@ -1548,6 +1914,13 @@ function readMarks(value: unknown): Record<string, number> {
 
 // TW Monitor's section that opens or closes: open at first, save the ones in
 // CLOSED_FIRST, for which the list holds the ones opened.
+// TW Monitor's refresh: this session's figures and the other sessions' files
+// read again now. Titles are not: they are read when a session is listed.
+async function refreshMonitor($: EngineInterface) {
+  await tick($)
+  await readSessions($)
+}
+
 async function toggleFold($: EngineInterface, id: string) {
   await update($, sessionsClosed, closed => (closed.includes(id) ? closed.filter(s => s !== id) : [...closed, id]))
 }
@@ -1589,9 +1962,16 @@ async function resetSetting($: EngineInterface, path: Path) {
 // session's scope); a session's own settings stay over them.
 async function resetDefaults($: EngineInterface) {
   if (!(await editsGlobal($))) return
-  await update($, globalSettings, () => DEFAULT_SETTINGS)
-  await $.store.set('settings', DEFAULT_SETTINGS)
+  // TW Monitor's settings are the Monitor view's to reset.
+  const next = { ...DEFAULT_SETTINGS, monitor: (await read($, globalSettings)).monitor }
+  await update($, globalSettings, () => next)
+  await $.store.set('settings', next)
   await applySettings($)
+}
+
+// Whether the settings are the defaults, TW Monitor's aside.
+function isDefault(tree: SettingsTree) {
+  return JSON.stringify({ ...tree, monitor: null }) === JSON.stringify({ ...DEFAULT_SETTINGS, monitor: null })
 }
 
 // The pace the band shows, now: each window's rate over its part's window,
@@ -1909,6 +2289,7 @@ async function sessionSnapshotOf($: EngineInterface, now: number, endedAt: strin
       root: await $.session.root().catch(() => null),
     },
     isWorking: await read($, working),
+    lastActiveAt: c.lastResponseAt === null ? null : iso(c.lastResponseAt),
     context:
       latest === null
         ? null
@@ -1920,6 +2301,109 @@ async function sessionSnapshotOf($: EngineInterface, now: number, endedAt: strin
       keepWarm: { on: k.on, mode: (await read($, settings)).warm.mode },
     },
   }
+}
+
+// The titles TW Monitor can name sessions by, read from their transcripts:
+// the last "custom-title" line Claude Code writes in a session's transcript
+// when it is named or renamed. Those lines are Claude Code's own, not a
+// documented interface: a title not found is null, and the session goes by
+// its folder. Read only while the Name setting uses titles, and then only for
+// a session with none stored (one just listed); or, `force` (the Title or
+// Folder / title button pressed), for every session listed. Kept in the
+// store, for every session's panel.
+async function readTitles($: EngineInterface, list: SessionSnapshot[], force = false) {
+  try {
+    if (!force && (await read($, settings)).monitor.name === 'folder') return
+    const now = await $.clock.now()
+    const saved = readTitleStore(await $.store.get('titles'))
+    let next = saved
+    for (const s of list) {
+      const id = s.session.id
+      if (id === null || (!force && id in saved)) continue
+      const path = await findTranscript($, id, [s.session.root, s.session.cwd])
+      const title = path === null ? null : await transcriptTitle($, path)
+      next = { ...next, [id]: { title, at: now } }
+    }
+    if (next !== saved) await $.store.set('titles', next)
+    await setTitles($, next)
+  } catch {
+    // Read again when the next session is listed.
+  }
+}
+
+// Every listed session's title read again: the Title or Folder / title
+// button pressed.
+async function rereadTitles($: EngineInterface) {
+  const own = await sessionSnapshotOf($, await $.clock.now(), null)
+  await readTitles($, [own, ...(await read($, sessions))], true)
+}
+
+// A transcript's last title. $.fs.read takes a file of FS_READ_MAX at most,
+// and a long session's transcript runs past it: such a file is searched with
+// `git grep`, which prints only the title lines, whatever the file's size
+// (no shell; where git is missing or finds none, null). Run from the
+// transcript's folder, since git grep --no-index searches only under the
+// directory it runs in.
+async function transcriptTitle($: EngineInterface, path: string) {
+  const stat = await $.fs.stat(path).catch(() => null)
+  if (stat !== null && stat.size <= FS_READ_MAX) return titleIn(await $.fs.read(path).catch(() => ''))
+  const cut = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
+  const found = await $.process
+    .run(['git', 'grep', '--no-index', '--no-color', '-h', '-o', '-E', '-e', TITLE_PATTERN, '--', path.slice(cut + 1)], {
+      cwd: path.slice(0, cut),
+      timeoutMs: GREP_TIMEOUT_MS,
+    })
+    .catch(() => null)
+  if (found === null || found.exitCode !== 0) return null
+  return titleIn(found.stdout.trim().split('\n').at(-1)?.replace(/^"customTitle"/, '"type":"custom-title","customTitle"') ?? '')
+}
+
+// The last title in a transcript's text, or null.
+function titleIn(text: string) {
+  const at = text.lastIndexOf('"type":"custom-title"')
+  if (at < 0) return null
+  const quoted = /"customTitle":("(?:[^"\\]|\\.)*")/.exec(text.slice(at, at + 4_000))?.[1]
+  if (!quoted) return null
+  return (JSON.parse(quoted) as string).trim() || null
+}
+
+// The titles as the store keeps them: by session id, each with when it was
+// read.
+function readTitleStore(value: unknown): Record<string, { title: string | null; at: number }> {
+  if (typeof value !== 'object' || value === null) return {}
+  return Object.fromEntries(
+    Object.entries(value).filter(([, entry]) => {
+      const e = entry as { title?: unknown; at?: unknown } | null
+      return typeof e?.at === 'number' && (e.title === null || typeof e.title === 'string')
+    }),
+  ) as Record<string, { title: string | null; at: number }>
+}
+
+// The titles put in place, by id.
+async function setTitles($: EngineInterface, saved: Record<string, { title: string | null; at: number }>) {
+  const next = Object.fromEntries(Object.entries(saved).map(([id, e]) => [id, e.title]))
+  if (JSON.stringify(next) !== JSON.stringify(await read($, titles))) await update($, titles, () => next)
+}
+
+// A session's transcript, ~/.claude/projects/<folder>/<id>.jsonl: the folder
+// is the project's path with every character but letters and digits as "-";
+// tried for the session's root and its directory, else looked for in every
+// project's folder. Null where none has it.
+async function findTranscript($: EngineInterface, id: string, dirs: (string | null | undefined)[]) {
+  const projects = await homePath($, PROJECTS_PARTS)
+  if (projects === null) return null
+  const has = (path: string) => $.fs.exists(path).catch(() => false)
+  const folders = dirs.filter((p): p is string => typeof p === 'string').map(p => p.replace(/[^a-zA-Z0-9]/g, '-'))
+  for (const folder of folders) {
+    const path = joinPath(projects, folder, `${id}.jsonl`)
+    if (await has(path)) return path
+  }
+  for (const entry of await $.fs.list(projects).catch(() => [])) {
+    if (entry.kind !== 'dir') continue
+    const path = joinPath(projects, entry.name, `${id}.jsonl`)
+    if (await has(path)) return path
+  }
+  return null
 }
 
 // A session's file read back, or null for one torn mid-write or of another
@@ -2005,7 +2489,7 @@ async function writeSessionFile($: EngineInterface, force = false, isEnded = fal
 
 // The other live sessions, read from their files for TW Monitor:
 // written in the last SNAPSHOT_FRESH_MS and not ended, by folder; and the
-// pins and hidden sessions.
+// pins, hidden sessions and titles.
 async function readSessions($: EngineInterface) {
   try {
     const id = await $.session.id().catch(() => null)
@@ -2016,9 +2500,19 @@ async function readSessions($: EngineInterface) {
       .filter(s => now - Date.parse(s.writtenAt) < SNAPSHOT_FRESH_MS)
       .sort((a, b) => folderOf(projectOf(a)).localeCompare(folderOf(projectOf(b))) || (a.session.id ?? '').localeCompare(b.session.id ?? ''))
     if (JSON.stringify(live) !== JSON.stringify(await read($, sessions))) await update($, sessions, () => live)
-    // The marks another session set reach this one. A mark is dropped once
-    // it is SESSION_SETTINGS_KEEP_MS old and its session is not running.
+    // A session just listed has its title read, while the Name setting uses
+    // titles.
+    await readTitles($, [await sessionSnapshotOf($, now, null), ...live])
+    // The marks another session set reach this one, and the titles. A mark
+    // or a title is dropped once it is SESSION_SETTINGS_KEEP_MS old and its
+    // session is not running.
     const running = new Set([id, ...live.map(s => s.session.id)])
+    const savedTitles = readTitleStore(await $.store.get('titles'))
+    const keptTitles = Object.fromEntries(
+      Object.entries(savedTitles).filter(([titleId, e]) => running.has(titleId) || now - e.at <= SESSION_SETTINGS_KEEP_MS),
+    )
+    if (Object.keys(keptTitles).length !== Object.keys(savedTitles).length) await $.store.set('titles', keptTitles)
+    await setTitles($, keptTitles)
     for (const mark of ['pinned', 'hidden'] as const) {
       const saved = readMarks(await $.store.get(MARKS[mark]))
       const kept = Object.fromEntries(
