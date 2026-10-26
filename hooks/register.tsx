@@ -66,7 +66,7 @@
 // staying on across prompts; Both, pings, and one notification a lead time
 // before the first ping of each idle spell. Alerts: a notification when a
 // usage window (once per window period, shared through the store so one
-// session says it) or this session's context crosses 80% or 95%.
+// session says it) or this session's context crosses the level set for it.
 //
 // Keep-warm: a ping is $.model.fork with a one-word prompt, which repeats the
 // main thread's last request so the API serves it from the cache and

@@ -2,11 +2,48 @@
 
 All notable changes to Token Watch are listed here. The project follows [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 1.4.0 (2026-10-26)
+
+TW Monitor lists every session on your machine; TW Settings gains per-session settings, keep-warm modes, alerts and burn rates.
+
+### Upgrading from 1.3.0
+
+- **`/context-bar` is now `/token-watch`:** `/token-watch [text|file|settings|monitor]`. The old name is gone, with no alias.
+- **Keep-warm now reminds by default:** its new default mode, Notify, sends a free notification before the cache expires instead of pinging. To ping as before, choose Pings in TW Settings under Cache time → Keep-warm. Your 1.3.0 choices (the parts hidden, the caps) carry over.
+- **The band is now the banner** throughout, and the settings panel is TW Settings.
+- Requires Claude Code 2.1.308 or later; tested on 2.1.310.
+
+### Added
+
+- **TW Monitor:** a second panel, opened by a `[#]` button under `[≡]` (⊞ on the desktop) or `/token-watch monitor`. It lists every Claude Code session running on the machine, this one first and marked `›`, each with its context and its cache's countdown, in collapsible sections, with your account's usage windows and their burn rates on top.
+  - **Pins:** `[ ]` / `[*]` (⚐ / ⚑ on the desktop) before a session keeps it above the others.
+  - **Hidden:** `[×]` moves a session to a Hidden section, `[↺]` brings it back.
+  - **Refresh:** `[↻]` reads the other sessions now; otherwise every 30 seconds while the panel is open.
+  - **Session files:** each session writes `~/.claude/token-watch/sessions/session-N.json` for it, in numbered slots that are reused. The Usage snapshot files option (renamed from Usage snapshot file) covers them.
+- **TW Monitor settings,** in TW Settings' new Monitor view: which pieces each usage window and each session's CTX and TTL lines show, expanded and collapsed (a group with nothing ticked is left out); the name (Folder, Title or Folder / title); the order (name, context, cache expiry, last activity); which sessions (all, a warm cache, or recent within 5 minutes to 7 days); whether this session stays on top; and Reset to default, Unpin all sessions and Unhide all sessions.
+- **Session titles:** with Name set to Title or Folder / title, a session's title is read from its Claude Code transcript when it is listed, and for every session when you press Title or Folder / title. A title not found yet is looked for again every 2 minutes while the session is listed; nothing is read otherwise, and the titles are deleted when you choose Folder again. A transcript over 4 MiB is searched with `git grep`.
+- **Per-session settings:** TW Settings switches between Session (this session's own, over the global ones), Global and Monitor. A row a session overrides has a `[Reset]`, and `[Reset to global]` clears them all; `[Reset to defaults]` puts the global settings back.
+- **Collapsible sections** for every part of TW Settings, and **per-view visibility:** each part shows or hides in Minimal, Collapsed and Expanded on its own.
+- **Burn rates and forecasts:** each usage window's pace over a period you choose (15 minutes to 2 hours for 5H, 2 to 24 hours for the others), in `%/h`, `%/min` or `%/day`, and when it would fill at that pace: a red time, `Safe` in green when it resets first, or `Full`. By default in the expanded view only. The snapshot's windows gain `ratePerHour` and `fullAt`.
+- **Keep-warm modes:** Notify (reminders only), Pings (as before) or Both (pings, and a reminder before the first ping each time you go idle), with how many minutes before the reminder comes. In Notify mode the button reads `Remind Me` and `Reminding`. The snapshot's keep-warm gains `mode`.
+- **Alerts:** a notification the first time a usage window or the context crosses a level, 50% to 95% in fives, or 99%. Off by default. A usage alert is set in Global and sent by one session per window period; a context alert is per session and comes again after a compaction.
+- **Context details:** optional lines under the legend for the MCP servers loaded, the memory files by name, and the skills and agents.
+- **Usage across sessions:** an idle session takes the usage figures another session reported more recently, within 30 seconds, and late or out-of-order figures never replace newer ones.
+- **Clear all data,** at the bottom of TW Settings' Global view, deletes everything Token Watch has stored. It takes 10 presses within 5 seconds.
 
 ### Changed
 
-- **`/context-bar` is now `/token-watch`:** `/token-watch [text|file|settings|monitor]`. The old name is gone, with no alias: type `/token-watch` where you typed `/context-bar`. The settings panel is now titled TW Settings.
+- **Buttons** in TW Settings and TW Monitor draw without the desktop's native frame: headings as `[▸]` / `[▾]` with their titles, checkboxes and choices with their labels, steppers and resets in brackets.
+- **Hiding the banner** with `/token-watch` turns keep-warm off in Pings and Both, so nothing spends out of sight; Notify stays on. Keep-warm also stops when its mode changes, here or in another session.
+- **Readings** go on with the banner hidden and the snapshot off, so the context's alert still comes. `claude -p` and SDK runs write no snapshot or session file.
+- The home folder is `USERPROFILE` on Windows and `HOME` elsewhere, as Node chooses, so WSL writes to its own home.
+- **Privacy:** Token Watch now also writes the session files, reads them for TW Monitor, sends notifications for reminders and alerts, and, only while Name uses titles, reads transcripts and may run `git grep`. The README's Privacy section lists every call.
+
+### Fixed
+
+- The keep-warm caps and the ping note no longer push the TTL row past its edge; the note gives way first.
+- After `/clear`, the banner shows the new conversation's context, not the last one's.
+- The expanded table keys its rows by window, so two windows with one label draw correctly.
 
 ## 1.3.0 (2026-10-25)
 
