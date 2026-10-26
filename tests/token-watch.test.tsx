@@ -524,11 +524,11 @@ describe('context bar', () => {
       expect(await band()).toContain('messages')
 
       const off = await run($, '')
-      expect(off.text).toBe('Token Watch hidden.')
+      expect(off.text).toBe('Token Watch banner hidden.')
       expect(JSON.stringify(await ui.drawn())).not.toContain('band.tsx')
 
       const shown = await run($, '')
-      expect(shown.text).toBe('Token Watch shown.')
+      expect(shown.text).toBe('Token Watch banner shown.')
       expect(await band()).toContain('"CTX"')
     })
 
@@ -770,7 +770,7 @@ describe('prompt cache', () => {
       expect((await run($, 'text')).text).toContain('TTL lost (1h · subscription)')
       // Pressed now, it does not start keep-warm and says why.
       await ui.press({ key: 'keep-warm' })
-      expect(await band()).toContain('keep-warm: the cache is already cold')
+      expect(await band()).toContain('keep-warm: the cache is already lost')
       expect(await band()).toContain(keepWarmCold(surface))
       // The collapsed timer: "--:--" in a red chip.
       await ui.pointer(rightClick)
@@ -945,7 +945,7 @@ describe('prompt cache', () => {
       await clock.advance(PING_AT)
       expect(forks.length).toBe(1)
       const stopped = await band()
-      expect(stopped).toContain('stopped: cache was cold')
+      expect(stopped).toContain('stopped: the ping found the cache lost')
       expect(stopped).toContain(timerTxt('--:-- / 5:00'))
       expect(stopped).toContain(keepWarmCold(surface))
       await ui.pointer(rightClick)
@@ -963,7 +963,7 @@ describe('prompt cache', () => {
       expect(await band()).toContain(keepWarmOn(surface))
       await clock.advance(30_000)
       expect(forks.length).toBe(2)
-      expect(await band()).toContain('stopped: 2 pings failed')
+      expect(await band()).toContain('stopped: 2 pings failed in a row')
       expect(await band()).toContain(keepWarmOff(surface))
     })
 
@@ -979,7 +979,7 @@ describe('prompt cache', () => {
       expect(await band()).toContain(keepWarmOn(surface))
       await clock.advance(30_000)
       expect(forks.length).toBe(2)
-      expect(await band()).toContain('stopped: 2 pings failed')
+      expect(await band()).toContain('stopped: 2 pings failed in a row')
       expect(await band()).toContain(keepWarmOff(surface))
     })
 
@@ -1140,7 +1140,7 @@ describe('prompt cache', () => {
       expect(forks.length).toBe(2)
       const after = await band()
       expect(after).toContain('ping failed: overloaded')
-      expect(after).not.toContain('stopped: 2 pings failed')
+      expect(after).not.toContain('stopped: 2 pings failed in a row')
       expect(after).toContain(keepWarmOn(surface))
     })
 
@@ -1229,7 +1229,7 @@ describe('keep-warm safety', () => {
     expect(forks.length).toBe(1)
     // Two minutes unanswered, and the cache past its expiry: given up on.
     await clock.advance(2 * MINUTE + 30_000)
-    expect(await band()).toContain('stopped: cache went cold')
+    expect(await band()).toContain('stopped: cache lost')
     // A new response, keep-warm on again: the lost ping holds nothing.
     await turn($, 't2')
     await ui.press({ key: 'keep-warm' })
@@ -1262,7 +1262,7 @@ describe('keep-warm safety', () => {
     await clock.advance(1_000)
     const after = await band()
     expect(after).toContain('ping failed: overloaded')
-    expect(after).not.toContain('stopped: 2 pings failed')
+    expect(after).not.toContain('stopped: 2 pings failed in a row')
     expect(after).toContain(keepWarmOn('terminal'))
   })
 
@@ -1283,7 +1283,7 @@ describe('keep-warm safety', () => {
     held.open()
     await clock.advance(1_000)
     const after = await band()
-    expect(after).not.toContain('stopped: 2 pings failed')
+    expect(after).not.toContain('stopped: 2 pings failed in a row')
     expect(after).toContain(keepWarmOn('terminal'))
   })
 
@@ -1460,7 +1460,7 @@ describe('settings panel', () => {
       expect(all).toContain(radio(surface, 'unit-5H-h', '%/h', true))
       expect(all).toContain('"key":"window-5H-down","label":"[-]","plain":true')
       expect(all).toContain('"key":"window-5H-up","label":"[+]","plain":true')
-      expect(all).toContain('"key":"reset-show-5H","label":"[reset]","plain":true')
+      expect(all).toContain('"key":"reset-show-5H","label":"[Reset]","plain":true')
       expect(all).toContain('"key":"reset-session","label":"[Reset to global]","plain":true')
       // No Button keeps the native frame; no mark is bracketed; and a label
       // is never drawn beside its mark's Button.
@@ -1734,7 +1734,7 @@ describe('settings scopes', () => {
     await pane.press({ key: 'scope-global' })
     const global = await drawn()
     expect(global).toContain(toggle('terminal', 'show-WK-expanded', false))
-    expect(global).toContain('overridden here')
+    expect(global).toContain('overridden in Session')
     expect(global).not.toContain('"key":"reset-show-WK"')
   })
 
@@ -2154,6 +2154,15 @@ describe('notify and alerts', () => {
     expect(forks.length).toBe(0)
   })
 
+  test('in Notify mode the text reading says reminder, with no ping caps (a reminder has none)', async ($, on) => {
+    const { ui } = await start($, on, 'terminal', RATE_LIMITS, undefined, DEFAULTS, FIVE_M)
+    await turn($)
+    await ui.press({ key: 'keep-warm' })
+    const text = (await run($, 'text')).text ?? ''
+    expect(text).toContain('keep-warm reminder')
+    expect(text).not.toContain('pings 0/')
+  })
+
   test('Notify stays on across a prompt from the person; Pings would not', async ($, on) => {
     const { ui, band, writes } = await start($, on, 'terminal', RATE_LIMITS, undefined, DEFAULTS, FIVE_M)
     await turn($)
@@ -2169,7 +2178,7 @@ describe('notify and alerts', () => {
     await ui.press({ key: 'keep-warm' })
     // The first ping at 3:45; its reminder a minute before.
     await clock.advance(PING_AT - MINUTE)
-    expect(notes).toEqual(['Token Watch pings in 1m to keep the prompt cache warm. Send a message to keep it yourself.'])
+    expect(notes).toEqual(['Token Watch pings in 1m to keep the prompt cache warm, unless you send a message first.'])
     expect(forks.length).toBe(0)
     await clock.advance(MINUTE)
     expect(forks.length).toBe(1)
@@ -2224,7 +2233,7 @@ describe('notify and alerts', () => {
     const { saved, notes } = await start($, on, 'terminal', limits, undefined, { settings: { alert: { '5H': 80 } } })
     fiveHourAt(limits, 82)
     await $.session.measure(MEASURE)
-    expect(notes).toEqual(['5H at 82%, resets in 2h 14m.'])
+    expect(notes).toEqual(['5-hour usage at 82%, resets in 2h 14m.'])
     fiveHourAt(limits, 85)
     await $.session.measure(MEASURE)
     expect(notes.length).toBe(1)
@@ -2244,7 +2253,7 @@ describe('notify and alerts', () => {
     limits[0] = { ...SEVEN_DAY, percentUsed: 55 }
     await $.session.measure(MEASURE)
     // 5H was said already; WK, not yet.
-    expect(notes).toEqual(['WK at 55%, resets in 3d 4h.'])
+    expect(notes).toEqual(['Weekly usage at 55%, resets in 3d 4h.'])
   })
 
   test("a session's own usage alert is not one: usage alerts are every session's", async ($, on) => {
@@ -2257,7 +2266,7 @@ describe('notify and alerts', () => {
     limits[0] = { ...SEVEN_DAY, percentUsed: 55 }
     await $.session.measure(MEASURE)
     // The session's own 5H alert counts for nothing; every session's WK alert does.
-    expect(notes).toEqual(['WK at 55%, resets in 3d 4h.'])
+    expect(notes).toEqual(['Weekly usage at 55%, resets in 3d 4h.'])
   })
 
   test('the context alert: once, and again after the context falls back under it', async ($, on) => {
@@ -2265,7 +2274,7 @@ describe('notify and alerts', () => {
     const { notes } = await start($, on, 'terminal', RATE_LIMITS, undefined, { settings: { alert: { CTX: 50 } } }, { context })
     context.total = 600_000
     await $.session.measure(MEASURE)
-    expect(notes).toEqual(['Context at 60% (600k of 1M).'])
+    expect(notes).toEqual(['Context at 60% (600k / 1M).'])
     context.total = 650_000
     await $.session.measure(MEASURE)
     expect(notes.length).toBe(1)
@@ -2803,12 +2812,12 @@ describe('TW Monitor', () => {
     const { files, clock } = await start($, on, 'desktop', RATE_LIMITS)
     await run($, 'monitor')
     const drawn = await mountSessions($, 'desktop')
-    expect(await drawn()).toContain('No other session is running')
+    expect(await drawn()).toContain('No other sessions on this device')
     const other = otherSession('new', 'C:/work/new', 0)
     files.set(`${SESSIONS_DIR}/session-9.json`, { text: JSON.stringify(other.file), mtimeMs: NOW })
     await clock.advance(30_000)
     expect(await drawn()).toContain('"new"')
-    expect(await drawn()).not.toContain('No other session is running')
+    expect(await drawn()).not.toContain('No other sessions on this device')
   })
 
   test('two sessions in one folder are told apart by id', async ($, on) => {
@@ -2835,7 +2844,7 @@ describe('TW Monitor', () => {
     const drawn = await (await mountSessions($, 'terminal'))()
     expect(drawn).toContain('"› proj"')
     expect(drawn).not.toContain('"web"')
-    expect(drawn).toContain('usage snapshot option')
+    expect(drawn).toContain('Usage snapshot files is off')
   })
 })
 
@@ -3265,7 +3274,7 @@ describe('TW Monitor settings', () => {
     // Below everything, with its note.
     const first = await drawn()
     expect(first.indexOf('/token-watch settings opens this panel again')).toBeLessThan(first.indexOf('"key":"clear-all"'))
-    expect(first).toContain('Press 10 times within 5 s to delete everything Token Watch has stored')
+    expect(first).toContain('Press 10 times within 5 seconds to delete everything Token Watch has stored')
     for (let i = 0; i < 9; i++) await pane.press({ key: 'clear-all' })
     expect(await drawn()).toContain('"children":["[Clear all data: 1 more]"]')
     expect(saved.get('pinned')).toEqual({ aa: NOW })
@@ -3312,7 +3321,7 @@ describe('token-watch as text', () => {
       expect(await band()).toContain('"CTX"')
       expect(saved.get('isShown')).toBeUndefined()
       expect((await run($, 'nonsense')).text).toBe('Usage: /token-watch [text|file|settings|monitor]')
-      expect((await run($, '')).text).toBe('Token Watch hidden.')
+      expect((await run($, '')).text).toBe('Token Watch banner hidden.')
     })
   }
 

@@ -152,7 +152,8 @@ const LEGEND: Record<string, string> = {
 // Below this many columns the expanded table leaves out the detail column.
 const DETAIL_MIN_COLUMNS = 50
 
-// The details lines' label column: "Memory" and a cell.
+// The details lines' label column: "Memory" and a cell (and the desktop's
+// slack).
 const DETAIL_LABEL_WIDTH = 7
 
 // Below this many columns the table leaves out the burn rates and forecasts.
@@ -409,7 +410,7 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
 
   return (
     <Box flexDirection="column" borderStyle="round" borderDimColor={!isHovered} paddingX={1}>
-      {rows.length === 0 && !showTtl && <Text dimColor>All parts are hidden.</Text>}
+      {rows.length === 0 && !showTtl && <Text dimColor>All parts are hidden. TW Settings shows them again.</Text>}
       {rows.map(row => (
         <Box key={row.key} flexDirection="row" alignItems="center" columnGap={2}>
           <Box width={labelWidth} flexShrink={0}>
@@ -459,7 +460,7 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
       {showCtx &&
         detailLines(current.details, props.details).map(([title, text]) => (
           <Box key={title} flexDirection="row" columnGap={1} paddingLeft={labelWidth + 2}>
-            <Box width={DETAIL_LABEL_WIDTH} flexShrink={0}>
+            <Box width={DETAIL_LABEL_WIDTH + (props.surface === 'terminal' ? 0 : SLACK)} flexShrink={0}>
               <Text dimColor>{title}</Text>
             </Box>
             <Box flexShrink={1} minWidth={0}>

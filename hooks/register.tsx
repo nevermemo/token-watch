@@ -210,13 +210,13 @@ const MONITOR_SORT_NAMES: Record<MonitorSort, string> = { name: 'Name', context:
 const MONITOR_FILTER_NAMES: Record<MonitorFilter, string> = { all: 'All', warm: 'Warm cache', recent: 'Recent' }
 const MONITOR_FILTER_NOTES: Record<MonitorFilter, string> = {
   all: 'Every session running on this device.',
-  warm: 'Sessions whose prompt cache is warm, or running a turn.',
+  warm: 'Sessions whose prompt cache is warm, or working.',
   recent: 'Sessions that answered within this time, or are running a turn.',
 }
 const MONITOR_CURRENT_NAMES: Record<MonitorCurrent, string> = { default: 'Default', top: 'On top' }
 const MONITOR_CURRENT_NOTES: Record<MonitorCurrent, string> = {
-  default: 'This session follows the pins, Hidden and the order like any other.',
-  top: 'This session comes first, and is never hidden here.',
+  default: 'Pins, Hidden and Sort apply to it like any other session; Show never leaves it out.',
+  top: 'Always listed first, and never hidden here.',
 }
 
 // Keep-warm's mode as TW Monitor notes it after a session's countdown, while
@@ -226,9 +226,9 @@ const MONITOR_WARM_NOTES: Record<WarmMode, string> = { pings: '(Ping)', notify: 
 // Keep-warm's modes as the panel names and explains them.
 const WARM_MODE_NAMES: Record<WarmMode, string> = { pings: 'Pings', notify: 'Notify', both: 'Both' }
 const WARM_MODE_NOTES: Record<WarmMode, string> = {
-  pings: 'Pings keep the cache warm while you are away.',
-  notify: 'No pings: a notification before the cache expires, free. Stays on across prompts.',
-  both: 'Pings, and a notification before the first ping of each idle spell.',
+  pings: 'Pings keep the cache warm while you are away; each ping uses tokens.',
+  notify: 'No pings: a free notification before the cache expires. Stays on when you type.',
+  both: 'Pings, and a notification before the first ping each time you go idle.',
 }
 
 // The settings panel's pane id, and its width when docked beside the transcript.
@@ -391,7 +391,7 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'token-watch',
       description:
-        'Show or hide the Token Watch banner (plan usage, context and the prompt cache countdown) above the prompt; right-click it to cycle its views; "text" for the reading as a line, "file" for the usage snapshot, "settings" for TW Settings, "monitor" for TW Monitor (every session\'s context and cache)',
+        'Show or hide the Token Watch banner above the prompt. "text" prints the reading, "file" the snapshot\'s path, "settings" opens TW Settings, "monitor" opens TW Monitor.',
       argumentHint: '[text|file|settings|monitor]',
     })
     const shown = await $.store.get('isShown')
@@ -567,6 +567,7 @@ export const register: Register = (on, options) => {
         keepWarm: await read($, keepWarm),
         isWorking: await read($, working),
         cap: await currentCap($),
+        warmMode: (await read($, settings)).warm.mode,
       })
       return { text: text || 'Token Watch: no reading yet.' }
     }
@@ -578,7 +579,7 @@ export const register: Register = (on, options) => {
       await takeReading($)
     }
 
-    return { text: shown ? 'Token Watch shown.' : 'Token Watch hidden.' }
+    return { text: shown ? 'Token Watch banner shown.' : 'Token Watch banner hidden.' }
   })
 
   on('ui.message', async ($, e, next) => {
@@ -644,7 +645,6 @@ export const register: Register = (on, options) => {
     const shown = isGlobal ? await read($, globalSettings) : await read($, settings)
     const open = await read($, openSections)
     const ttl = (await read($, cache)).ttl
-    const capWidth = 'Hours:'.length + (isTerminal ? 0 : 1)
     const paceWidth = 'Window:'.length + (isTerminal ? 0 : 1)
 
     // A row's override marker: a reset in this session's scope, a note in
@@ -652,11 +652,11 @@ export const register: Register = (on, options) => {
     const marker = (path: Path) =>
       !overridesUnder(own, path) ? null : isGlobal ? (
         <Text key={`over-${path.join('-')}`} dimColor wrap="truncate">
-          overridden here
+          overridden in Session
         </Text>
       ) : (
         <Button key={`reset-${path.join('-')}`} plain dimColor onPress={() => void resetSetting($, path)}>
-          {wrap('reset')}
+          {wrap('Reset')}
         </Button>
       )
     // A section's heading, which opens and closes it, and its body indented.
@@ -815,7 +815,7 @@ export const register: Register = (on, options) => {
       </Box>
     )
     const monitorView = () => (
-      <Box flexDirection="column">
+      <Box flexDirection="column" rowGap={1}>
         {section('monitor-usage', 'Usage', () => (
           <Box flexDirection="column">
             {USAGE_PARTS.map(part =>
@@ -826,7 +826,7 @@ export const register: Register = (on, options) => {
                 { isSub: true },
               ),
             )}
-            {note('A window with nothing on is left out, and the section with every window so.')}
+            {note('A window with nothing ticked is left out, and Usage too when every window is.')}
           </Box>
         ))}
         {section('monitor-lines', 'Session lines', () => (
@@ -852,13 +852,13 @@ export const register: Register = (on, options) => {
             {choices('monitor-name', MONITOR_NAMES, MONITOR_NAME_NAMES, mon.name, value =>
               void setSetting($, ['monitor', 'name'], value).then(() => (value === 'folder' ? undefined : rereadTitles($))),
             )}
-            {note('A title is read from its session\'s transcript when the session is listed, and again for every session when Title or Folder / title is pressed.')}
+            {note('A title is read from its session\'s transcript when the session is listed, and again for every session when Title or Folder / title is pressed. A session without one shows its folder.')}
           </Box>
         ))}
         {section('monitor-sort', 'Sort', () => (
           <Box flexDirection="column">
             {choices('monitor-sort', MONITOR_SORTS, MONITOR_SORT_NAMES, mon.sort, value => void setSetting($, ['monitor', 'sort'], value))}
-            {note('Pinned sessions come first either way.')}
+            {note('Pinned sessions always come first.')}
           </Box>
         ))}
         {section('monitor-filter', 'Show', () => (
@@ -930,7 +930,7 @@ export const register: Register = (on, options) => {
           </Button>
         </Box>
         <Text dimColor wrap="wrap">
-          {`Press ${CLEAR_PRESSES} times within ${CLEAR_WINDOW_MS / 1000} s to delete everything Token Watch has stored: settings, pins, hidden sessions, titles and usage history. Its files in ~/.claude/token-watch stay; Usage snapshot files in /config turns them off.`}
+          {`Press ${CLEAR_PRESSES} times within ${CLEAR_WINDOW_MS / 1000} seconds to delete everything Token Watch has stored: settings, pins, hidden sessions, titles and usage history. Its files in ~/.claude/token-watch stay; turn them off with Usage snapshot files in /config.`}
         </Text>
       </Box>
     )
@@ -946,10 +946,10 @@ export const register: Register = (on, options) => {
           </Box>
           <Text dimColor wrap="wrap">
             {isMonitor
-              ? "TW Monitor's settings, the same in every session."
+              ? 'Changes apply to TW Monitor in every session.'
               : isGlobal
                 ? 'Changes apply to every session, except where one has its own setting.'
-                : 'Changes apply to this session only, over the global settings.'}
+                : 'Changes apply to this session only, over Global. Usage alerts are set in Global.'}
           </Text>
         </Box>
         {isMonitor && monitorView()}
@@ -976,7 +976,7 @@ export const register: Register = (on, options) => {
                     })}
                   </Box>
                   <Text dimColor wrap="wrap">
-                    Lines under the legend, in the expanded view.
+                    Shown under the legend in the Expanded view.
                   </Text>
                 </Box>
               ),
@@ -993,7 +993,7 @@ export const register: Register = (on, options) => {
                 <Box flexDirection="column">
                   {viewChoices(['show', 'TTL'], 'show-TTL')}
                   <Text dimColor wrap="wrap">
-                    Hidden in every view, keep-warm turns off.
+                    Hiding it in every view turns keep-warm off.
                   </Text>
                 </Box>
               ),
@@ -1025,7 +1025,7 @@ export const register: Register = (on, options) => {
                     )}
                 </Box>
               ),
-              { isSub: true, extra: marker(['warm', 'mode']) },
+              { isSub: true, extra: marker(['warm']) },
             )}
             {section(
               'cache-limits',
@@ -1038,7 +1038,7 @@ export const register: Register = (on, options) => {
                     return stepper(
                       which,
                       which === 'pings' ? 'Pings:' : 'Hours:',
-                      capWidth,
+                      paceWidth,
                       String(value),
                       value <= min,
                       value >= max,
@@ -1047,11 +1047,11 @@ export const register: Register = (on, options) => {
                     )
                   })}
                   <Text dimColor wrap="wrap">
-                    {`Defaults: ${DEFAULT_CAPS[ttl].pings} pings or ${DEFAULT_CAPS[ttl].hours} hours. A running keep-warm already past a new cap stops.`}
+                    {`Defaults: ${DEFAULT_CAPS[ttl].pings} pings or ${DEFAULT_CAPS[ttl].hours} hours. Caps apply to pings, not reminders; a running keep-warm past a new cap stops.`}
                   </Text>
                 </Box>
               ),
-              { isSub: true },
+              { isSub: true, extra: marker(['caps', ttl]) },
             )}
           </Box>
         ))}
@@ -1059,7 +1059,7 @@ export const register: Register = (on, options) => {
         <Text dimColor wrap="wrap">
           {isMonitor
             ? '/token-watch monitor opens TW Monitor; /token-watch settings opens this panel again.'
-            : 'A pace is averaged over its window, once that holds 5 minutes of readings. /token-watch settings opens this panel again.'}
+            : 'A burn rate is averaged over its window once that holds 5 minutes of readings. /token-watch settings opens this panel again.'}
         </Text>
         {isGlobal && !isMonitor && clear()}
       </Box>
@@ -1340,14 +1340,14 @@ export const register: Register = (on, options) => {
         </Box>
         {hasMeter && meter(fraction, fill)}
         {hasValue && (
-          <Box width={SESSION_VALUE_WIDTH} flexShrink={0}>
+          <Box width={SESSION_VALUE_WIDTH + (isTerminal ? 0 : 1)} flexShrink={0}>
             <Text color={color} dimColor={color === undefined || undefined} wrap="truncate">
               {value}
             </Text>
           </Box>
         )}
         {note !== null && (
-          <Box {...(rate === null ? { flexShrink: 1, minWidth: 0 } : { width: SESSION_NOTE_WIDTH, flexShrink: 0 })}>
+          <Box {...(rate === null ? { flexShrink: 1, minWidth: 0 } : { width: SESSION_NOTE_WIDTH + (isTerminal ? 0 : 1), flexShrink: 0 })}>
             <Text dimColor wrap="truncate">
               {note}
             </Text>
@@ -1515,10 +1515,10 @@ export const register: Register = (on, options) => {
         )}
         <Text dimColor wrap="wrap">
           {sessionsDir === null
-            ? 'Other sessions are not shown: their files are off with the usage snapshot option (/config).'
+            ? 'Other sessions are not shown while Usage snapshot files is off in /config.'
             : others.length === 0
-              ? 'No other session is running on this device. The list is read every 30 s.'
-              : 'Sessions on this device, read every 30 s. /token-watch monitor opens this panel again.'}
+              ? 'No other sessions on this device. Checked every 30 seconds.'
+              : 'Sessions on this device, checked every 30 seconds. /token-watch monitor opens this panel again.'}
         </Text>
       </Box>
     )
@@ -2065,7 +2065,7 @@ async function toggleKeepWarm($: EngineInterface) {
     if (!isWorking && c.warmUntil === null) {
       await update($, keepWarm, kw => ({ ...kw, note: { at: now, text: 'keep-warm: nothing cached yet' } }))
     } else if (!isWorking && c.warmUntil !== null && now >= c.warmUntil) {
-      await update($, keepWarm, kw => ({ ...kw, note: { at: now, text: 'keep-warm: the cache is already cold' } }))
+      await update($, keepWarm, kw => ({ ...kw, note: { at: now, text: 'keep-warm: the cache is already lost' } }))
     } else {
       await update($, keepWarm, () => ({ ...KEEP_WARM_OFF, on: true, startedAt: now }))
       await schedule($)
@@ -2161,7 +2161,7 @@ async function remind($: EngineInterface) {
     const text =
       mode === 'notify'
         ? `The prompt cache expires in ${duration(c.warmUntil - now)}. Send a message to keep it warm.`
-        : `Token Watch pings in ${duration(c.warmUntil - leadMs(c.windowMs) - now)} to keep the prompt cache warm. Send a message to keep it yourself.`
+        : `Token Watch pings in ${duration(c.warmUntil - leadMs(c.windowMs) - now)} to keep the prompt cache warm, unless you send a message first.`
     await $.ui.notify(text, { title: 'Token Watch' }).catch(() => null)
     const notifiedFor = mode === 'notify' ? c.warmUntil : c.lastResponseAt
     await update($, keepWarm, kw => ({ ...kw, notifiedFor, note: { at: now, text: 'reminder sent' } }))
@@ -2205,7 +2205,7 @@ async function ping($: EngineInterface) {
     // While the TTL row is hidden keep-warm stays off: however it came to be
     // on (another session hid the row, a press raced the toggle), it stops here.
     if (isCacheHidden(await read($, settings))) return await stopKeepWarm($, null)
-    if (sentAt >= c.warmUntil) return await stopKeepWarm($, 'stopped: cache went cold')
+    if (sentAt >= c.warmUntil) return await stopKeepWarm($, 'stopped: cache lost')
     const reached = capReached(k, caps(c.ttl, (await read($, settings)).caps), sentAt)
     if (reached !== null) return await stopKeepWarm($, reached)
 
@@ -2244,7 +2244,7 @@ async function ping($: EngineInterface) {
         // A response during the ping (a background turn) has rebased the
         // countdown since: that one stands.
         await update($, cache, cc => (cc.lastResponseAt !== null && cc.lastResponseAt > sentAt ? cc : { ...cc, warmUntil: sentAt }))
-        await stopKeepWarm($, 'stopped: cache was cold')
+        await stopKeepWarm($, 'stopped: the ping found the cache lost')
       } else {
         // The first ping since the response, more than five minutes after it,
         // read the cache: that is the hour TTL at work.
@@ -2286,7 +2286,7 @@ async function ping($: EngineInterface) {
 async function pingFailed($: EngineInterface, why: string, now: number) {
   await update($, keepWarm, kw => ({ ...kw, failures: kw.failures + 1, note: { at: now, text: `ping failed: ${why}` } }))
   if ((await read($, keepWarm)).failures >= MAX_FAILURES) {
-    return await stopKeepWarm($, `stopped: ${MAX_FAILURES} pings failed`)
+    return await stopKeepWarm($, `stopped: ${MAX_FAILURES} pings failed in a row`)
   }
   stopPingTimer()
   pingTimer = $.clock.after(RETRY_MS, () => void ping($))
@@ -2709,7 +2709,7 @@ async function heartbeat($: EngineInterface) {
     const isReminder = (await read($, settings)).warm.mode === 'notify'
     const isCold = k.on && !isReminder && c.warmUntil !== null && now >= c.warmUntil && !(await read($, working))
     if (isCold && !(await isPingOut($, now))) {
-      await stopKeepWarm($, 'stopped: cache went cold')
+      await stopKeepWarm($, 'stopped: cache lost')
     } else if (pingTimer === null) {
       await schedule($)
     }
@@ -2753,7 +2753,7 @@ async function checkAlerts($: EngineInterface) {
       const crossed = levelsOn(partOf(w)).filter(level => w.percentUsed >= level && !kept.includes(level))
       if (crossed.length === 0) continue
       const left = countdown(w.resetsAt, now)
-      await notify($, `${label(w)} at ${Math.round(w.percentUsed)}%${left ? `, resets in ${left}` : ''}.`)
+      await notify($, `${usageName(w)} at ${Math.round(w.percentUsed)}%${left ? `, resets in ${left}` : ''}.`)
       next = { ...next, [w.kind]: { resetsAt, levels: [...kept, ...crossed] } }
     }
     if (next !== alerted) await $.store.set('alerted', next)
@@ -2762,13 +2762,19 @@ async function checkAlerts($: EngineInterface) {
       const percent = Math.round((latest.total / latest.window) * 100)
       const kept = (await read($, ctxAlerted)).filter(level => percent >= level)
       const crossed = levelsOn('CTX').filter(level => percent >= level && !kept.includes(level))
-      if (crossed.length > 0) await notify($, `Context at ${percent}% (${short(latest.total)} of ${short(latest.window)}).`)
+      if (crossed.length > 0) await notify($, `Context at ${percent}% (${short(latest.total)} / ${short(latest.window)}).`)
       const levels = [...kept, ...crossed]
       if (JSON.stringify(levels) !== JSON.stringify(await read($, ctxAlerted))) await update($, ctxAlerted, () => levels)
     }
   } catch {
     // Checked again at the next reading.
   }
+}
+
+// A usage window as a notification names it, out of the banner's context:
+// "5-hour usage", "Weekly usage", "FB usage".
+function usageName(w: Limit) {
+  return w.kind === 'five_hour' ? '5-hour usage' : w.kind === 'seven_day' ? 'Weekly usage' : `${label(w)} usage`
 }
 
 async function notify($: EngineInterface, text: string) {

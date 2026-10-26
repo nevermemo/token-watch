@@ -2,7 +2,7 @@
 // spells its figures, so the band, the /token-watch reading and the usage
 // snapshot all say the same thing.
 
-import type { Cap, CacheState, KeepWarm, Limit, Reading, UsagePart } from '../types'
+import type { Cap, CacheState, KeepWarm, Limit, Reading, UsagePart, WarmMode } from '../types'
 import { TTL_MS } from './cache'
 
 // Usage windows by kind, in the order they are shown; any other window the
@@ -139,7 +139,7 @@ export function capsText(keepWarm: KeepWarm, cap: Cap, nowMs: number) {
 }
 
 // What the text reply knows of the cache beside the reading.
-export type CacheLine = { cache: CacheState; keepWarm: KeepWarm; isWorking: boolean; cap: Cap }
+export type CacheLine = { cache: CacheState; keepWarm: KeepWarm; isWorking: boolean; cap: Cap; warmMode?: WarmMode }
 
 // The reading as one line of text, for where the band cannot be drawn:
 // "5H 62% (2h 14m) · WK 31% (3d 4h) · CTX 21% (212k / 1M)", then once there
@@ -155,9 +155,10 @@ export function readingLine(reading: Reading | null, limits: Limit[], nowMs: num
     parts.push(`CTX ${percent}% (${short(reading.total)} / ${short(reading.window)})`)
   }
   if (cacheLine && (cacheLine.cache.warmUntil !== null || cacheLine.keepWarm.on)) {
-    const { cache, keepWarm, isWorking, cap } = cacheLine
+    const { cache, keepWarm, isWorking, cap, warmMode } = cacheLine
     const extras = [ttlText(cache)]
-    if (keepWarm.on) extras.push(`keep-warm ${capsText(keepWarm, cap, nowMs)}`)
+    // A reminder has no caps.
+    if (keepWarm.on) extras.push(warmMode === 'notify' ? 'keep-warm reminder' : `keep-warm ${capsText(keepWarm, cap, nowMs)}`)
     if (keepWarm.lastPing !== null) {
       extras.push(`last ping read ${short(keepWarm.lastPing.read)} wrote ${short(keepWarm.lastPing.wrote)}`)
     }

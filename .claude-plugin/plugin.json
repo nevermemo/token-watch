@@ -1,7 +1,7 @@
 {
   "name": "token-watch",
   "version": "1.3.0",
-  "description": "Plan usage and the context window as thin bars above the Claude Code prompt, with a prompt cache countdown and an opt-in keep-warm. Right-click to cycle its views; a settings panel picks what it shows; /token-watch hides it, or reads it as text where nothing draws.",
+  "description": "Plan usage, the context window and the prompt cache countdown as a banner above the Claude Code prompt, with burn rates, alerts and an opt-in keep-warm. TW Settings picks what it shows; TW Monitor lists every session's context and cache. /token-watch hides the banner, or prints it as text where it can't be drawn.",
   "author": {
     "name": "Kadir Mert Okumus",
     "url": "https://github.com/nevermemo"
@@ -26,7 +26,7 @@
     "snapshot": {
       "type": "boolean",
       "title": "Usage snapshot files",
-      "description": "Write each reading under ~/.claude/token-watch/: usage.json for Token Watch for VS Code, and this session's file in sessions/ for TW Monitor. Local only; no other file is touched.",
+      "description": "Write each reading under ~/.claude/token-watch/: usage.json for Token Watch for VS Code, and a file per session in sessions/ for TW Monitor. Local only; no other file is touched.",
       "default": true
     }
   }
