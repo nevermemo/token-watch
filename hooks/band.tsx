@@ -164,8 +164,11 @@ const RATE_MIN_COLUMNS = 70
 const FORECAST = '#e06c6c'
 const SAFE = '#8fd18f'
 
-// Below this many columns the TTL row leaves out keep-warm's caps and notes.
+// Below this many columns the TTL row leaves out keep-warm's caps and notes;
+// short of room above it, the note gives way this many times faster than
+// the caps.
 const CAPS_MIN_COLUMNS = 90
+const NOTE_SHRINK = 100
 
 // Cells of slack in each fixed column: the desktop draws text in a
 // proportional font, where "CTX" or "100%" can be wider than its characters.
@@ -410,7 +413,13 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
 
   return (
     <Box flexDirection="column" borderStyle="round" borderDimColor={!isHovered} paddingX={1}>
-      {rows.length === 0 && !showTtl && <Text dimColor>All parts are hidden. TW Settings shows them again.</Text>}
+      {rows.length === 0 && !showTtl && (
+        <Text dimColor>
+          {props.limits.length === 0
+            ? 'CTX and TTL are hidden, and there is no plan usage to show. TW Settings shows them again.'
+            : 'All parts are hidden. TW Settings shows them again.'}
+        </Text>
+      )}
       {rows.map(row => (
         <Box key={row.key} flexDirection="row" alignItems="center" columnGap={2}>
           <Box width={labelWidth} flexShrink={0}>
@@ -490,8 +499,9 @@ const Band: ClientModule<BandProps, Local> = (props, surface) => {
             </Box>
           )}
           {showCaps && chip('refresh-caps', 'Refresh Caps', CHIP_OFF, 'refresh-caps')}
+          {/* The note gives way first, the caps after it. */}
           {note !== '' && (
-            <Box flexShrink={1} minWidth={0}>
+            <Box flexShrink={NOTE_SHRINK} minWidth={0}>
               <Text dimColor wrap="truncate">
                 {note}
               </Text>

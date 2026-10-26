@@ -165,7 +165,7 @@ import {
   windowText,
 } from './settings'
 import type { Path } from './settings'
-import { addReadings, fullAt, ratePerHour, rateText, readHistory } from './burn'
+import { DROP_RESET, addReadings, fullAt, isEarlier, isSameReset, ratePerHour, rateText, readHistory } from './burn'
 import { countdown, duration, hmmss, label, levelColor, partOf, readingLine, short, sorted } from './format'
 
 const reading = atom({ plugin: 'token-watch', key: 'reading' } as const, null)
@@ -440,12 +440,11 @@ export const register: Register = (on, options) => {
 
   on('session.measure', async ($, e, next) => {
     const result = await next(e)
-    // The snapshot follows every reading, band or no band. A reading here
-    // follows a response, so its windows are fresh: the store gets them too.
-    if (snapshotOn || (await read($, isShown))) {
-      await tick($)
-      await takeReading($, true)
-    }
+    // A reading after every measurement, banner shown or not (the context's
+    // alert and the snapshot need it). A reading here follows a response, so
+    // its windows are fresh: the store gets them too, where they are newer.
+    await tick($)
+    await takeReading($, true)
 
     return result
   })
@@ -527,8 +526,8 @@ export const register: Register = (on, options) => {
       // The session is over (the process goes on only under another one,
       // which keeps the slot): its file says so first, within the hook's
       // budget, and stays so; the slot is free for the next.
-      await writeSessionFile($, true, true)
       hasEnded = true
+      await writeSessionFile($, true, true)
     }
     await writeSnapshot($)
     return result
@@ -577,6 +576,10 @@ export const register: Register = (on, options) => {
     await $.store.set('isShown', shown)
     if (shown) {
       await takeReading($)
+    } else if ((await read($, keepWarm)).on && (await read($, settings)).warm.mode !== 'notify') {
+      // Nothing spends out of sight: pings stop with the banner (a
+      // reminder costs nothing, and stays).
+      await stopKeepWarm($, 'stopped: banner hidden')
     }
 
     return { text: shown ? 'Token Watch banner shown.' : 'Token Watch banner hidden.' }
@@ -850,7 +853,7 @@ export const register: Register = (on, options) => {
         {section('monitor-name', 'Name', () => (
           <Box flexDirection="column">
             {choices('monitor-name', MONITOR_NAMES, MONITOR_NAME_NAMES, mon.name, value =>
-              void setSetting($, ['monitor', 'name'], value).then(() => (value === 'folder' ? undefined : rereadTitles($))),
+              void setSetting($, ['monitor', 'name'], value).then(() => (value === 'folder' ? forgetTitles($) : rereadTitles($))),
             )}
             {note('A title is read from its session\'s transcript when the session is listed, and again for every session when Title or Folder / title is pressed. A session without one shows its folder.')}
           </Box>
@@ -1613,21 +1616,39 @@ async function takeReading($: EngineInterface, isFresh = false) {
     const { context, rateLimits } = await $.session.usage({ breakdown: 'summary' })
     if (rateLimits.length > 0 && (isFresh || (await read($, limits)).length === 0)) {
       const reported: Limit[] = rateLimits.map(({ kind, percentUsed, resetsAt }) => ({ kind, percentUsed, resetsAt }))
+      // Against the newest figures any session has: a window from an earlier
+      // period, or a little lower in the same one, is a reading that arrived
+      // late (an idle session's last response, two responses crossing), and
+      // the newer stands; a fall of DROP_RESET points or more is real. A
+      // reading with nothing newer than the store is not stamped or shared.
+      const known = isFresh ? (readLimits(await $.store.get('limits')) ?? []) : []
+      const knownOf = (r: Limit) => known.find(w => w.kind === r.kind)
+      const isLate = (r: Limit, k: Limit) =>
+        isEarlier(r.resetsAt, k.resetsAt) ||
+        (isSameReset(r.resetsAt, k.resetsAt) && r.percentUsed < k.percentUsed && k.percentUsed - r.percentUsed < DROP_RESET)
+      const newest = reported.map(r => {
+        const k = knownOf(r)
+        return k && isLate(r, k) ? k : r
+      })
+      const taken = reported.filter(r => {
+        const k = knownOf(r)
+        return !k || (!isLate(r, k) && (k.percentUsed !== r.percentUsed || !isSameReset(r.resetsAt, k.resetsAt)))
+      })
       // A window the reading leaves out keeps its last values until its reset
       // time; one still left out after that is no longer part of the plan.
       const now = await $.clock.now()
       const kept = (await read($, limits)).filter(
         w => !reported.some(r => r.kind === w.kind) && !!w.resetsAt && Date.parse(w.resetsAt) > now,
       )
-      const windows = [...reported, ...kept]
+      const windows = [...newest, ...kept]
       await update($, limits, () => windows)
-      if (isFresh) {
+      if (isFresh && taken.length > 0) {
         await update($, limitsAt, () => now)
         await $.store.set('limits', windows)
         await $.store.set('limitsAt', now)
         // Read the store's samples first: another session may have added some.
         const before = readHistory(await $.store.get('history'))
-        const after = addReadings(before, reported, now)
+        const after = addReadings(before, taken, now)
         await update($, history, () => after)
         if (after !== before) await $.store.set('history', after)
       }
@@ -2156,6 +2177,11 @@ async function remind($: EngineInterface) {
     const c = await read($, cache)
     const mode = (await read($, settings)).warm.mode
     if (!k.on || c.warmUntil === null || mode === 'pings') return
+    // One reminder per countdown (Notify) or idle spell (Both): noted before
+    // it is sent, so a second timer finds it sent.
+    const notifiedFor = mode === 'notify' ? c.warmUntil : c.lastResponseAt
+    if (k.notifiedFor === notifiedFor) return
+    await update($, keepWarm, kw => ({ ...kw, notifiedFor }))
     await tick($)
     const now = await read($, nowMs)
     const text =
@@ -2163,8 +2189,7 @@ async function remind($: EngineInterface) {
         ? `The prompt cache expires in ${duration(c.warmUntil - now)}. Send a message to keep it warm.`
         : `Token Watch pings in ${duration(c.warmUntil - leadMs(c.windowMs) - now)} to keep the prompt cache warm, unless you send a message first.`
     await $.ui.notify(text, { title: 'Token Watch' }).catch(() => null)
-    const notifiedFor = mode === 'notify' ? c.warmUntil : c.lastResponseAt
-    await update($, keepWarm, kw => ({ ...kw, notifiedFor, note: { at: now, text: 'reminder sent' } }))
+    await update($, keepWarm, kw => ({ ...kw, note: { at: now, text: 'reminder sent' } }))
   } catch {
     // Nothing to show; the next countdown arms another.
   }
@@ -2307,13 +2332,19 @@ async function resolvePaths($: EngineInterface) {
 }
 
 // A path under the home directory, such as the snapshot's,
-// ~/.claude/token-watch/usage.json: `~` is USERPROFILE (Windows) or else
-// HOME, the choice Node's os.homedir() makes, so the companion finds it. The
+// ~/.claude/token-watch/usage.json: `~` is USERPROFILE on Windows and HOME
+// elsewhere, the choice Node's os.homedir() makes, so the companion finds it. The
 // path is joined with the home directory's own separator: backslashes if it
 // has any, else slashes. Null when neither variable is set.
 async function homePath($: EngineInterface, parts: string[]) {
   try {
-    const home = (await $.env.get('USERPROFILE')) || (await $.env.get('HOME'))
+    // USERPROFILE on Windows, HOME elsewhere (WSL may carry a Windows
+    // USERPROFILE), each the other's fallback.
+    // Each variable named as written: the engine reads env names literally.
+    const isWindows = (await $.env.get('OS')) === 'Windows_NT'
+    const profile = await $.env.get('USERPROFILE')
+    const posixHome = await $.env.get('HOME')
+    const home = isWindows ? profile || posixHome : posixHome || profile
     if (!home) return null
     return joinPath(home.replace(/[\\/]+$/, ''), ...parts)
   } catch {
@@ -2393,8 +2424,13 @@ async function readTitles($: EngineInterface, list: SessionSnapshot[], force = f
         titleMisses.set(id, now)
         continue
       }
-      titleMisses.delete(id)
+      // No title yet (a session named soon after its first prompt): looked
+      // for again as for a missing transcript, until one is there.
       const title = await transcriptTitle($, path)
+      if (title === null) {
+        titleMisses.set(id, now)
+        continue
+      }
       next = { ...next, [id]: { title, at: now } }
     }
     if (next !== saved) await $.store.set('titles', next)
@@ -2432,6 +2468,14 @@ async function transcriptTitle($: EngineInterface, path: string) {
     .catch(() => null)
   if (found === null || found.exitCode !== 0) return null
   return titleIn(found.stdout.trim().split('\n').at(-1) ?? '')
+}
+
+// Back to folders: the titles read from other sessions' transcripts are not
+// kept.
+async function forgetTitles($: EngineInterface) {
+  await $.store.delete('titles')
+  titleMisses.clear()
+  await setTitles($, {})
 }
 
 // The last title in a transcript's text, or null.
@@ -2568,6 +2612,8 @@ async function writeSessionFile($: EngineInterface, force = false, isEnded = fal
     }
     if (slotPath === null) slotPath = await claimSlot($, now)
     if (slotPath === null) return
+    // A write that began before the session ended does not put it back.
+    if (hasEnded && !isEnded) return
     await $.fs.write(slotPath, JSON.stringify(file, null, 2) + '\n')
     slotId = file.session.id
     lastSlotKey = key
@@ -2720,7 +2766,9 @@ async function heartbeat($: EngineInterface) {
     try {
       const stat = await $.fs.stat(snapshotPath).catch(() => null)
       const now = await $.clock.now()
-      const isOthers = stat !== null && stat.mtimeMs > lastWriteMs + 1_000 && now - stat.mtimeMs < SNAPSHOT_FRESH_MS
+      let isOthers = stat !== null && stat.mtimeMs > lastWriteMs + 1_000 && now - stat.mtimeMs < SNAPSHOT_FRESH_MS
+      // A reload forgets this session's last write: the file says whose it is.
+      if (isOthers && lastWriteMs === 0) isOthers = (await snapshotOwner($, snapshotPath)) !== (await $.session.id().catch(() => null))
       // This session's own file is written either way.
       if (isOthers) await writeSessionFile($, true)
       else await writeSnapshot($, true)
@@ -2821,11 +2869,26 @@ function readAlerted(value: unknown): Record<string, { resetsAt: string | null; 
   ) as Record<string, { resetsAt: string | null; levels: number[] }>
 }
 
+// The session id usage.json names, or null.
+async function snapshotOwner($: EngineInterface, path: string) {
+  const text = await $.fs.read(path).catch(() => null)
+  if (text === null) return null
+  try {
+    const id = (JSON.parse(text) as { session?: { id?: unknown } } | null)?.session?.id
+    return typeof id === 'string' ? id : null
+  } catch {
+    return null
+  }
+}
+
 // What /token-watch file answers: where the snapshot is and when it was
 // last written, or why there is none.
 async function snapshotStatus($: EngineInterface) {
   if (!snapshotOn) {
     return 'Token Watch snapshot: off. Turn it on in /config ("Usage snapshot files"), or in /plugin, token-watch, Configure options.'
+  }
+  if (!isInteractive) {
+    return 'Token Watch snapshot: not written in a run nobody is at the prompt for (claude -p, the SDK).'
   }
   if (!snapshotPath) {
     return 'Token Watch snapshot: on, but neither USERPROFILE nor HOME is set, so there is nowhere to write it.'

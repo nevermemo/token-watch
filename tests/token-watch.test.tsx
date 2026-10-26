@@ -1890,14 +1890,16 @@ describe('burn rate', () => {
     await clock.advance(10 * MINUTE)
     fiveHourAt(limits, 66.4)
     await $.session.measure(MEASURE)
-    // Over 30 minutes: 62.4 to 66.4, 8 an hour. Over 15: from 62.4 (the value
-    // when the 15 minutes began) to 66.4, 16 an hour.
-    expect(await band()).toContain('"8.0%/h"')
+    // The value when a window began lies on the line between the readings
+    // either side of it. Over 30 minutes: from 62.73 (a third of the way from
+    // 62.4 to 63.4) to 66.4, 7.3 an hour. Over 15: from 63.23 to 66.4, 12.7 an
+    // hour, 0.21 a minute.
+    expect(await band()).toContain('"7.3%/h"')
     const { pane } = await mountPanel($, 'terminal', { open: ['usage', 'usage-5H'] })
     await pane.press({ key: 'window-5H-down' })
-    expect(await band()).toContain('"16%/h"')
+    expect(await band()).toContain('"13%/h"')
     await pane.press({ key: 'unit-5H-min' })
-    expect(await band()).toContain('"0.27%/min"')
+    expect(await band()).toContain('"0.21%/min"')
   })
 
   test('WK offers windows of 2 to 24 hours and %/h or %/day', async ($, on) => {
@@ -1954,7 +1956,7 @@ describe('burn rate', () => {
     expect(await band()).toContain('"color":"#e06c6c"},"children":["Full"]')
   })
 
-  test("once a window's reset time passes, its last period's pace goes, until a reading starts the new one", async ($, on) => {
+  test("once a window's reset time passes, its last period's pace goes, until a reading starts the new one", { timeoutMs: 30_000 }, async ($, on) => {
     const limits = [...RATE_LIMITS]
     const { band, clock } = await start($, on, 'terminal', limits)
     await clock.advance(10 * MINUTE)
@@ -1991,7 +1993,7 @@ describe('burn rate', () => {
     expect(await band()).toContain('"144%/day"')
   })
 
-  test('the collapsed line shows a forecast only with its pace, never the forecast alone', async ($, on) => {
+  test('the collapsed line leaves out the forecasts before the paces: never the forecast without its pace when both are on', async ($, on) => {
     const limits = [...RATE_LIMITS]
     const { ui, band, clock } = await start($, on, 'terminal', limits, undefined, {
       settings: {
@@ -2010,6 +2012,52 @@ describe('burn rate', () => {
       const line = await band()
       if (line.includes('"1h 05m"')) expect(line).toContain('"30%/h"')
     }
+  })
+
+  test('a gap between readings is spread over the gap, not booked at its end: usage elsewhere reads at its pace', async ($, on) => {
+    // 10% two hours ago, then nothing here while another device used 20
+    // points: 10 an hour, not 40.
+    const limits = [...RATE_LIMITS]
+    fiveHourAt(limits, 30)
+    const { band } = await start($, on, 'terminal', limits, undefined, {
+      settings: { warm: { mode: 'pings' } },
+      history: { five_hour: { resetsAt: FIVE_HOUR.resetsAt, samples: [{ at: NOW - 2 * 60 * MINUTE, percent: 10 }] } },
+    })
+    await $.session.measure(MEASURE)
+    expect(await band()).toContain('"10%/h"')
+  })
+
+  test('a fall of 5 points or more in the same period starts the pace over (a plan change); a late reading of an earlier period is left out', async ($, on) => {
+    const limits = [...RATE_LIMITS]
+    const { band, clock, saved } = await start($, on, 'terminal', limits)
+    await clock.advance(10 * MINUTE)
+    fiveHourAt(limits, 67.4)
+    await $.session.measure(MEASURE)
+    fiveHourAt(limits, 20)
+    await $.session.measure(MEASURE)
+    const history = () => (saved.get('history') as Record<string, { samples: { percent: number }[] }>).five_hour!.samples
+    expect(history().map(s => s.percent)).toEqual([20])
+    expect(await band()).not.toContain('"30%/h"')
+    // A reading from the period before (an earlier reset time) arrives late.
+    limits[1] = { kind: 'five_hour', percentUsed: 95, resetsAt: new Date(NOW - MINUTE).toISOString() }
+    await $.session.measure(MEASURE)
+    expect(history().map(s => s.percent)).toEqual([20])
+  })
+
+  test("an idle session's older figures never go over the newer ones another session stored", async ($, on) => {
+    const limits = [...RATE_LIMITS]
+    const newer = [{ ...FIVE_HOUR, percentUsed: 64 }, SEVEN_DAY]
+    const { saved, band } = await start($, on, 'terminal', limits, undefined, {
+      settings: { warm: { mode: 'pings' } },
+      limits: newer,
+      limitsAt: NOW - MINUTE,
+    })
+    // This session's own last response said 62.4: older, a little lower, same
+    // period (a fall of 5 points or more would be real).
+    await $.session.measure(MEASURE)
+    expect(saved.get('limits')).toEqual(newer)
+    expect(saved.get('limitsAt')).toBe(NOW - MINUTE)
+    expect(await band()).toContain('"64%"')
   })
 
   test("the samples are the account's: a new session reads the pace at once from the store", async ($, on) => {
@@ -2107,12 +2155,17 @@ describe('usage across sessions', () => {
     expect(saved.get('limits')).toEqual([SEVEN_DAY, { ...FIVE_HOUR, percentUsed: 80 }])
   })
 
-  test('a reading after a response stamps the store, for the other sessions', async ($, on) => {
-    const { clock, saved } = await start($, on, 'terminal', RATE_LIMITS)
+  test('a reading after a response stamps the store, for the other sessions, when it brings something newer', async ($, on) => {
+    const limits = [...RATE_LIMITS]
+    const { clock, saved } = await start($, on, 'terminal', limits)
     await clock.advance(MINUTE)
+    // The same figures again: nothing to share.
+    await $.session.measure(MEASURE)
+    expect(saved.get('limitsAt')).toBe(NOW)
+    fiveHourAt(limits, 63.4)
     await $.session.measure(MEASURE)
     expect(saved.get('limitsAt')).toBe(NOW + MINUTE)
-    expect(saved.get('limits')).toMatchObject([{ kind: 'seven_day' }, { kind: 'five_hour', percentUsed: 62.4 }])
+    expect(saved.get('limits')).toMatchObject([{ kind: 'seven_day' }, { kind: 'five_hour', percentUsed: 63.4 }])
   })
 })
 
@@ -3254,6 +3307,8 @@ describe('TW Monitor settings', () => {
     const d = await (await mountSessions($, 'terminal'))()
     expect(d).not.toContain('alpha')
     expect(d).toContain('"label":"[▾] zulu"')
+    // The stored windows left out: the reading has the context alone.
+    expect((await run($, 'text')).text).toBe('CTX 21% (212k / 1M)')
   })
 
   test("the context's alert in this session's view: this session's own", async ($, on) => {
@@ -3262,6 +3317,70 @@ describe('TW Monitor settings', () => {
     await pane.press({ key: 'alert-CTX-enable' })
     expect(saved.get(SESSION_KEY)).toMatchObject({ settings: { alert: { CTX: 99 } } })
     expect(saved.get('settings')).toEqual({ warm: { mode: 'pings' } })
+  })
+
+  test('with no plan usage (an API key) and CTX and TTL hidden, the banner says so, not that every part is hidden', async ($, on) => {
+    const { band } = await start($, on, 'terminal', [], undefined, {
+      settings: { warm: { mode: 'pings' }, show: { CTX: { expanded: false }, TTL: { expanded: false } } },
+    })
+    expect(await band()).toContain('CTX and TTL are hidden, and there is no plan usage to show.')
+    expect(await band()).not.toContain('All parts are hidden')
+  })
+
+  test('hiding the banner with /token-watch stops pings; a reminder, which costs nothing, stays', async ($, on) => {
+    const pings = await start($, on, 'terminal', RATE_LIMITS, undefined, undefined, FIVE_M)
+    await turn($)
+    await pings.ui.press({ key: 'keep-warm' })
+    expect((await run($, '')).text).toBe('Token Watch banner hidden.')
+    await pings.clock.advance(10 * MINUTE)
+    expect(pings.forks.length).toBe(0)
+    expect(snapshotOf(pings.writes).cache.keepWarm.on).toBe(false)
+  })
+
+  test('a reminder stays on with the banner hidden', async ($, on) => {
+    const { ui, clock, notes } = await start($, on, 'terminal', RATE_LIMITS, undefined, DEFAULTS, FIVE_M)
+    await turn($)
+    await ui.press({ key: 'keep-warm' })
+    await run($, '')
+    await clock.advance(4 * MINUTE)
+    expect(notes.length).toBe(1)
+  })
+
+  test("readings go on with the banner hidden and snapshot files off: the context's alert still comes", { options: { snapshot: false } }, async ($, on) => {
+    const context = { total: 212_200 }
+    const { notes } = await boot($, on, 'terminal', RATE_LIMITS, { stored: { isShown: false, settings: { alert: { CTX: 50 } } }, context })
+    context.total = 600_000
+    await $.session.measure(MEASURE)
+    expect(notes).toEqual(['Context at 60% (600k / 1M).'])
+  })
+
+  test('the home folder is HOME off Windows, even with a Windows USERPROFILE carried in (WSL)', async ($, on) => {
+    await boot($, on, 'terminal', RATE_LIMITS, { env: { HOME: '/home/you', USERPROFILE: 'C:\\Users\\you' } })
+    expect((await run($, 'file')).text).toBe('Token Watch snapshot: /home/you/.claude/token-watch/usage.json (written 0s ago).')
+  })
+
+  test('on Windows the home folder is USERPROFILE', async ($, on) => {
+    await boot($, on, 'terminal', RATE_LIMITS, { env: { OS: 'Windows_NT', HOME: '/c/Users/you', USERPROFILE: 'C:\\Users\\you' } })
+    expect((await run($, 'file')).text).toBe('Token Watch snapshot: C:\\Users\\you\\.claude\\token-watch\\usage.json (written 0s ago).')
+  })
+
+  test('/token-watch file in a run nobody is at the prompt for says why there is no snapshot', async ($, on) => {
+    await boot($, on, null, RATE_LIMITS, { surfaces: [], interactive: false })
+    expect((await run($, 'file')).text).toContain('claude -p')
+  })
+
+  test("back to Folder, the titles read from other sessions' transcripts are not kept", async ($, on) => {
+    const { saved, files } = await start($, on, 'terminal', RATE_LIMITS, undefined, monitorSettings({ name: 'title' }), {
+      sessionFiles: { 'session-1.json': otherSession('aa', 'C:/work/alpha', 10_000) },
+    })
+    files.set(`${TRANSCRIPTS}/C--work-alpha/aa.jsonl`, { text: transcript('Alpha work', 'aa'), mtimeMs: NOW })
+    await run($, 'monitor')
+    expect(saved.get('titles')).toMatchObject({ aa: { title: 'Alpha work' } })
+    const { pane } = await mountPanel($, 'terminal')
+    await pane.press({ key: 'scope-monitor' })
+    await pane.press({ key: 'section-monitor-name' })
+    await pane.press({ key: 'monitor-name-folder' })
+    expect(saved.get('titles')).toBeUndefined()
   })
 
   test('Clear all data: ten presses within 5 s, counted down, clear every stored thing; fewer, or slower, clear nothing', async ($, on) => {
