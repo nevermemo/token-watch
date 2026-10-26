@@ -905,9 +905,9 @@ export const register: Register = (on, options) => {
     const isPinned = (s: SessionSnapshot) => s.session.id !== null && s.session.id in pins
     const others = await read($, sessions)
     const all = [own, ...others.filter(isPinned), ...others.filter(s => !isPinned(s))]
-    // A session's pin, at its heading's right edge, dim until pinned: the
-    // checkbox's ☐ / ☑ on the desktop, whose font gives [ ] and [*] different
-    // widths; [ ] / [*] in a terminal, where they match.
+    // A session's pin, at its heading's right edge, dim until pinned: a flag,
+    // ⚐ / ⚑, on the desktop, one shape outlined and filled, whose font gives
+    // [ ] and [*] different widths; [ ] / [*] in a terminal, where they match.
     const pin = (s: SessionSnapshot) => {
       const id = s.session.id
       if (id === null) return null
@@ -915,7 +915,7 @@ export const register: Register = (on, options) => {
       return (
         <Box flexShrink={0}>
           <Button key={`pin-${id}`} plain dimColor={!isOn || undefined} onPress={() => void togglePin($, id)}>
-            {isTerminal ? (isOn ? '[*]' : '[ ]') : isOn ? '☑' : '☐'}
+            {isTerminal ? (isOn ? '[*]' : '[ ]') : isOn ? '⚑' : '⚐'}
           </Button>
         </Box>
       )

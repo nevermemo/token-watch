@@ -2460,7 +2460,7 @@ describe('TW Monitor', () => {
       // right edge, after a spacer that takes the room between.
       expect(first).toContain(`"label":"${heading(open, '› proj')}","plain":true}`)
       expect(first).toContain(
-        `{"type":"Box","props":{"flexGrow":1}},{"type":"Box","props":{"flexShrink":0},"children":[{"type":"Button","props":{"key":"pin-sess-1","label":"${surface === 'terminal' ? '[ ]' : '☐'}"`,
+        `{"type":"Box","props":{"flexGrow":1}},{"type":"Box","props":{"flexShrink":0},"children":[{"type":"Button","props":{"key":"pin-sess-1","label":"${surface === 'terminal' ? '[ ]' : '⚐'}"`,
       )
       // The rule: a line of 50 cells in a terminal (the body less its
       // margins), a hairline on the desktop.
@@ -2537,13 +2537,13 @@ describe('TW Monitor', () => {
     // By folder at first; every session has a pin, this one too.
     expect(await order()).toEqual(['› proj', 'alpha', 'zulu'])
     for (const id of ['sess-1', 'aa', 'zz']) expect(await drawn()).toContain(`"key":"pin-${id}","label":"[ ]","plain":true,"dimColor":true`)
-    // The desktop's are the checkbox's, the same width on and off.
+    // The desktop's are a flag, outlined and filled: the same width on and off.
     const desk = await $.ui.mount<Surface, 'Pane'>({ ...SESSIONS_PANE, surface: 'desktop' })
-    expect(JSON.stringify(await desk.drawn())).toContain('"key":"pin-aa","label":"☐","plain":true,"dimColor":true')
+    expect(JSON.stringify(await desk.drawn())).toContain('"key":"pin-aa","label":"⚐","plain":true,"dimColor":true')
     await pane.press({ key: 'pin-zz' })
     expect(saved.get('pinned')).toEqual({ zz: NOW })
     expect(await drawn()).toContain('"key":"pin-zz","label":"[*]","plain":true}')
-    expect(JSON.stringify(await desk.drawn())).toContain('"key":"pin-zz","label":"☑","plain":true}')
+    expect(JSON.stringify(await desk.drawn())).toContain('"key":"pin-zz","label":"⚑","plain":true}')
     // Pinned: above alpha, still under this session.
     expect(await order()).toEqual(['› proj', 'zulu', 'alpha'])
     await pane.press({ key: 'pin-zz' })
