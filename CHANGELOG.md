@@ -35,7 +35,7 @@ TW Monitor lists every session on your machine; TW Settings gains per-session se
 
 - **Buttons** in TW Settings and TW Monitor draw without the desktop's native frame: headings as `[▸]` / `[▾]` with their titles, checkboxes and choices with their labels, steppers and resets in brackets.
 - **Hiding the banner** with `/token-watch` turns keep-warm off in Pings and Both, so nothing spends out of sight; Notify stays on. Keep-warm also stops when its mode changes, here or in another session.
-- **Readings** go on with the banner hidden and the snapshot off, so the context's alert still comes. `claude -p` and SDK runs write no snapshot or session file.
+- **Readings** go on with the banner hidden and the snapshot off, so the context's alert still comes. A run nothing draws (`claude -p`, the SDK on its own) writes no snapshot or session file; the desktop app's sessions do.
 - The home folder is `USERPROFILE` on Windows and `HOME` elsewhere, as Node chooses, so WSL writes to its own home.
 - **Privacy:** Token Watch now also writes the session files, reads them for TW Monitor, sends notifications for reminders and alerts, and, only while Name uses titles, reads transcripts and may run `git grep`. The README's Privacy section lists every call.
 

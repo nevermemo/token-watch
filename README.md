@@ -285,7 +285,7 @@ On the one-hour TTL, Claude Code can compact a conversation of 200k tokens or mo
 | `claude` in a terminal (including editor terminals and JetBrains) | Shown |
 | The Code tab of the Claude desktop app | Shown |
 | The VS Code extension's chat panel | Loads, but there is no banner above the prompt to draw in, so `/token-watch` answers with the reading as text. [Token Watch for VS Code](https://github.com/nevermemo/token-watch-vscode) shows it in the status bar. |
-| `claude -p`, the Agent SDK | Loads and answers `/token-watch` as text; writes no snapshot or session file, since nobody is at the prompt |
+| `claude -p`, the Agent SDK | Loads and answers `/token-watch` as text; writes no snapshot or session file while nothing draws the session, since nobody sees it |
 | Cloud sessions | Not drawn: cloud sessions don't load plugins installed on your machine, and don't show mod drawings |
 
 ## Token Watch for VS Code
@@ -350,7 +350,7 @@ You can check this yourself before installing: `claude plugin validate ./token-w
 - **Hooks:** `session.start`, `session.measure`, `turn.start` and `turn.complete` (when a main-thread turn begins and ends; the text is not read), `prompt.submit` (only the prompt's origin, to stop keep-warm's pings when you type; the prompt passes through untouched), `session.compact` and `session.end` (compaction and the session ending stop keep-warm), `command.run` (for `/token-watch`), `ui.message` (the banner's clicks), and `ui.render` (the banner, TW Settings and TW Monitor).
 - **Calls:**
   - `$.session.usage`: the context breakdown and usage windows. Claude Code estimates these locally, without extra API requests.
-  - `$.session.surfaces`, `$.session.id`, `$.session.cwd`, `$.session.root`: where the session draws (so `/token-watch` knows whether to toggle the banner or answer as text), and the session's id, directory and project root for the snapshot, its session file and TW Monitor.
+  - `$.session.surfaces`, `$.session.id`, `$.session.cwd`, `$.session.root`: where the session draws (so `/token-watch` knows whether to toggle the banner or answer as text, and the files are written only for a session someone sees), and the session's id, directory and project root for the snapshot, its session file and TW Monitor.
   - `$.clock`: the countdowns, the 30-second refresh, keep-warm's timers and Clear all data's window.
   - `$.model.fork`: the keep-warm ping, one small request over your conversation, sent only while keep-warm pings.
   - `$.ui.notify`: keep-warm's reminders and your alerts.

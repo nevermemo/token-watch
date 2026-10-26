@@ -3245,6 +3245,24 @@ describe('TW Monitor settings', () => {
     expect(sessionWrites.length).toBe(0)
   })
 
+  test('a session the desktop app draws, not interactive, writes its snapshot and its session file', async ($, on) => {
+    const { writes, sessionWrites, clock } = await boot($, on, null, RATE_LIMITS, { surfaces: ['desktop'], interactive: false })
+    await clock.advance(30_000)
+    expect(writes.length).toBeGreaterThan(0)
+    expect(sessionWrites.length).toBeGreaterThan(0)
+  })
+
+  test('a session a surface attaches to after its start writes its files from the next tick', async ($, on) => {
+    const surfaces: RenderSurface[] = []
+    const { writes, sessionWrites, clock } = await boot($, on, null, RATE_LIMITS, { surfaces, interactive: false })
+    await clock.advance(30_000)
+    expect(sessionWrites.length).toBe(0)
+    surfaces.push('desktop')
+    await clock.advance(30_000)
+    expect(writes.length).toBeGreaterThan(0)
+    expect(sessionWrites.length).toBeGreaterThan(0)
+  })
+
   test('a transcript not found yet stores no title; looked for again 2 minutes on, it is read', async ($, on) => {
     const { saved, files, clock } = await start($, on, 'terminal', RATE_LIMITS, undefined, monitorSettings({ name: 'title' }), {
       sessionFiles: { 'session-1.json': otherSession('aa', 'C:/work/alpha', 0) },

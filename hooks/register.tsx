@@ -364,11 +364,11 @@ let slotPath: string | null = null
 let slotId: string | null = null
 let lastSlotMs = 0
 let lastSlotKey = ''
-// Whether a person is at the prompt (a `claude -p` or SDK run writes no
-// files), whether this session has ended (its file says so, and stays so),
+// Whether anyone sees this session (a `claude -p` or SDK run nobody draws
+// writes no files), whether this session has ended (its file says so, and stays so),
 // when its own settings were last saved again, and when a session's
 // transcript was last looked for and not found.
-let isInteractive = true
+let isSeen = true
 let hasEnded = false
 let lastTouchMs = 0
 const titleMisses = new Map<string, number>()
@@ -383,7 +383,7 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     const result = await next(e)
-    isInteractive = e.isInteractive
+    isSeen = e.isInteractive
     hasEnded = false
     // The clock first, so a step below that fails cannot leave the session
     // without its countdowns, its file and its settings' updates.
@@ -2318,17 +2318,26 @@ async function pingFailed($: EngineInterface, why: string, now: number) {
 }
 
 // Where the snapshot and the sessions' files go: nowhere with the snapshot
-// option off, nor in a run nobody is at the prompt for (`claude -p`, the
-// SDK), which would take usage.json over and fill TW Monitor. Worked out
+// option off, nor in a run nobody sees (`claude -p`, an SDK run nothing
+// draws), which would take usage.json over and fill TW Monitor. Worked out
 // again each tick, so an option changed mid-session is followed.
 async function resolvePaths($: EngineInterface) {
-  if (!snapshotOn || !isInteractive) {
+  if (!snapshotOn || !(await checkSeen($))) {
     snapshotPath = null
     sessionsDir = null
     return
   }
   snapshotPath ??= await homePath($, SNAPSHOT_PARTS)
   sessionsDir ??= await homePath($, SESSIONS_PARTS)
+}
+
+// Whether anyone sees this session: a person at the REPL's prompt, or any
+// surface drawing it. The desktop app runs a session as the SDK does, not
+// interactive, and attaches as a surface, maybe after the start; once seen,
+// a session stays seen while a window closes and opens again.
+async function checkSeen($: EngineInterface) {
+  if (!isSeen) isSeen = (await $.session.surfaces().catch(() => [])).length > 0
+  return isSeen
 }
 
 // A path under the home directory, such as the snapshot's,
@@ -2887,8 +2896,8 @@ async function snapshotStatus($: EngineInterface) {
   if (!snapshotOn) {
     return 'Token Watch snapshot: off. Turn it on in /config ("Usage snapshot files"), or in /plugin, token-watch, Configure options.'
   }
-  if (!isInteractive) {
-    return 'Token Watch snapshot: not written in a run nobody is at the prompt for (claude -p, the SDK).'
+  if (!(await checkSeen($))) {
+    return 'Token Watch snapshot: not written in a run nobody sees (claude -p, an SDK run nothing draws).'
   }
   if (!snapshotPath) {
     return 'Token Watch snapshot: on, but neither USERPROFILE nor HOME is set, so there is nowhere to write it.'
