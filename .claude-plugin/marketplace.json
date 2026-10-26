@@ -8,7 +8,7 @@
     {
       "name": "token-watch",
       "source": ".",
-      "description": "Plan usage and the context window as thin bars above the Claude Code prompt, with a prompt cache countdown and an opt-in keep-warm. Right-click to cycle its views; a settings panel picks what it shows; /context-bar hides it, or reads it as text where nothing draws."
+      "description": "Plan usage and the context window as thin bars above the Claude Code prompt, with a prompt cache countdown and an opt-in keep-warm. Right-click to cycle its views; a settings panel picks what it shows; /token-watch hides it, or reads it as text where nothing draws."
     }
   ]
 }

@@ -2,6 +2,12 @@
 
 All notable changes to Token Watch are listed here. The project follows [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Changed
+
+- **`/context-bar` is now `/token-watch`:** `/token-watch [text|file|settings|monitor]`. The old name is gone, with no alias: type `/token-watch` where you typed `/context-bar`. The settings panel is now titled TW Settings.
+
 ## 1.3.0 (2026-10-25)
 
 A settings panel: choose what the band shows, and set keep-warm's caps.

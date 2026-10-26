@@ -167,9 +167,18 @@ type Boot = {
   context?: { total: number }
   // The breakdown's lists: MCP tools, memory files, skills and agents.
   breakdown?: Extras
+  // The directory the session is in, which a shell `cd` moves; C:/proj (its
+  // root) by default.
+  cwd?: string
+  // Files already in the sessions folder (other sessions'), by name: each
+  // one's content (an object is written as JSON) and its mtime.
+  sessionFiles?: Record<string, { file: unknown; mtimeMs: number }>
 }
 
 type Write = { path: string; text: string }
+
+// The sessions folder under the test's home directory.
+const SESSIONS_DIR = 'C:/Users/test/.claude/token-watch/sessions'
 
 // A gate for forks held open: `open()` lets every waiting fork answer.
 function gate() {
@@ -178,6 +187,13 @@ function gate() {
     open = resolve
   })
   return { opened, open }
+}
+
+// The engine hands $.fs.write the path resolved to the platform's own form
+// (backslashes on Windows), whatever string the mod gave; the mod's own
+// spelling is what /token-watch file reports.
+function slash(p: string) {
+  return p.replace(/\\/g, '/')
 }
 
 // The i-th write (the last by default), which a test has just made happen.
@@ -201,6 +217,15 @@ async function boot($: Engine, on: On, surface: 'terminal' | 'desktop' | null, r
   const opens: PaneOpenArgs[] = []
   const closes: string[] = []
   const notes: string[] = []
+  // The sessions folder, kept in memory: what is in it and every write to it
+  // (`writes` holds the usage snapshot's alone).
+  const sessionWrites: Write[] = []
+  const files = new Map<string, { text: string; mtimeMs: number }>(
+    Object.entries(options.sessionFiles ?? {}).map(([name, { file, mtimeMs }]) => [
+      `${SESSIONS_DIR}/${name}`,
+      { text: typeof file === 'string' ? file : JSON.stringify(file), mtimeMs },
+    ]),
+  )
   // Most tests here are about pings, so keep-warm is in Pings mode (the
   // default is Notify) unless a test brings saved settings of its own,
   // 1.3.0's keys included.
@@ -247,7 +272,8 @@ async function boot($: Engine, on: On, surface: 'terminal' | 'desktop' | null, r
   })
   on('session.surfaces', () => ({ value: options.surfaces ?? (surface ? [surface] : []) }))
   on('session.id', () => ({ value: 'sess-1' }))
-  on('session.cwd', () => ({ value: 'C:/proj' }))
+  on('session.cwd', () => ({ value: options.cwd ?? 'C:/proj' }))
+  on('session.root', () => ({ value: 'C:/proj' }))
   on('fs.stat', () =>
     (options.statMtimeMs === undefined
       ? { deny: 'ENOENT' }
@@ -261,19 +287,39 @@ async function boot($: Engine, on: On, surface: 'terminal' | 'desktop' | null, r
     closes.push(e.id)
     return { value: undefined }
   })
+  on('ui.panes', () => ({
+    value: opens
+      .filter(pane => !closes.includes(pane.id))
+      .map(pane => ({ id: pane.id, title: pane.title ?? pane.id, isShown: true, isFocused: false, isPlaced: true })),
+  }))
   on('fs.write', ($, e) => {
-    writes.push({ path: e.path, text: e.text })
+    const path = slash(e.path)
+    if (path.startsWith(`${SESSIONS_DIR}/`)) {
+      sessionWrites.push({ path, text: e.text })
+      files.set(path, { text: e.text, mtimeMs: clock.now() })
+    } else {
+      writes.push({ path: e.path, text: e.text })
+    }
     return { value: undefined }
+  })
+  on('fs.list', ($, e) => ({
+    value: [...files]
+      .filter(([path]) => path.slice(0, path.lastIndexOf('/')) === slash(e.path))
+      .map(([path, f]) => ({ name: path.slice(path.lastIndexOf('/') + 1), kind: 'file', size: f.text.length, mtimeMs: f.mtimeMs, isLink: false })),
+  }))
+  on('fs.read', ($, e) => {
+    const f = files.get(slash(e.path))
+    return f === undefined ? { deny: 'ENOENT' } : { value: f.text }
   })
   await $.session.start({ cwd: '.', surface, isInteractive: true })
 
-  return { writes, saved, clock, forks, opens, closes, notes }
+  return { writes, saved, clock, forks, opens, closes, notes, sessionWrites, files }
 }
 
 // `beneath`: text a mod beneath this one draws in the band, if any.
 // `stored`: what the mod's store holds from earlier sessions.
 async function start($: Engine, on: On, surface: Surface, rateLimits: SessionRateLimit[], beneath?: string, stored?: Record<string, unknown>, options: Boot = {}) {
-  const { writes, saved, clock, forks, opens, closes, notes } = await boot($, on, surface, rateLimits, { ...options, beneath, stored })
+  const { writes, saved, clock, forks, opens, closes, notes, sessionWrites, files } = await boot($, on, surface, rateLimits, { ...options, beneath, stored })
   const ui = await $.ui.mount<Surface, 'AbovePrompt'>({ ...BAND, surface })
   await ui.resize({ columns: 116, rows: 8, in: 'band' })
   const band = async () => JSON.stringify(await ui.drawn({ in: 'band' }))
@@ -281,7 +327,7 @@ async function start($: Engine, on: On, surface: Surface, rateLimits: SessionRat
   // The whole drawing, the settings button beside the band included.
   const tree = async () => JSON.stringify(await ui.drawn())
 
-  return { ui, band, tree, writes, saved, clock, forks, opens, closes, notes }
+  return { ui, band, tree, writes, saved, clock, forks, opens, closes, notes, sessionWrites, files }
 }
 
 // One main-thread turn, started and ended at the clock's time now.
@@ -957,7 +1003,7 @@ describe('prompt cache', () => {
     // The TTL follows Claude Code's controls in their order of precedence, then
     // the plan. The band no longer says where the TTL comes from, so the
     // precedence is asserted where the source is still reported: the snapshot's
-    // ttlSource and the /context-bar text line.
+    // ttlSource and the /token-watch text line.
     const TTL_CASES: [string, Boot, SessionRateLimit[], '5m' | '1h', string][] = [
       ['FORCE_PROMPT_CACHING_5M beats the TTL variable', { env: { USERPROFILE: 'C:/Users/test', FORCE_PROMPT_CACHING_5M: '1', CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' } }, RATE_LIMITS, '5m', 'FORCE_PROMPT_CACHING_5M'],
       ['the TTL variable beats the setting', { env: { USERPROFILE: 'C:/Users/test', CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' }, settings: { promptCacheTtl: '5m' } }, [], '1h', 'CLAUDE_CODE_PROMPT_CACHE_TTL'],
@@ -1312,7 +1358,7 @@ const PANE = {
   plugin: 'token-watch',
   component: 'Pane',
   requestId: 'token-watch-settings',
-  props: { title: 'Token Watch', isFocused: false, bodyColumns: 52, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
+  props: { title: 'TW Settings', isFocused: false, bodyColumns: 52, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
 } as const
 
 // The sub-sections a section holds, opened with it by mountPanel.
@@ -1340,9 +1386,14 @@ async function mountPanel($: Engine, surface: Surface, options: { scope?: 'globa
   return { pane, drawn }
 }
 
-// A toggle as the panel draws it: the mark alone in the Button.
+// A checkbox as the panel draws it: its mark and its label in one plain
+// Button; ☑ / ☐ on the desktop, ● / ○ in a terminal. The label's start, up to
+// the space after the mark.
 const toggle = (surface: Surface, key: string, isOn: boolean) =>
-  `"key":"${key}","label":"${surface === 'terminal' ? (isOn ? '[●]' : '[○]') : isOn ? '☑' : '☐'}"`
+  `"key":"${key}","label":"${surface === 'terminal' ? (isOn ? '●' : '○') : isOn ? '☑' : '☐'} `
+// A radio button the same way: ◉ / ○ on the desktop, ● / ○ in a terminal.
+const radio = (surface: Surface, key: string, label: string, isOn: boolean) =>
+  `"key":"${key}","label":"${isOn ? (surface === 'terminal' ? '●' : '◉') : '○'} ${label}","plain":true`
 
 // Settings, as the store keeps them, that hide these parts in every view.
 const hiddenEverywhere = (...parts: string[]) => ({
@@ -1354,13 +1405,57 @@ const SESSION_KEY = 'session:sess-1'
 
 describe('settings panel', () => {
   for (const surface of ['terminal', 'desktop'] as const) {
+    test(`${surface}: a section's heading is one plain Button, [▸] / [▾] and its title, bold for a section, not for a row`, async ($, on) => {
+      await start($, on, surface, RATE_LIMITS)
+      const { pane, drawn } = await mountPanel($, surface)
+      expect(await drawn()).toContain(
+        '{"type":"Button","props":{"key":"section-usage","label":"[▸] Usage","plain":true},',
+      )
+      await pane.press({ key: 'section-usage' })
+      await pane.press({ key: 'section-usage-5H' })
+      const opened = await drawn()
+      expect(opened).toContain('"key":"section-usage","label":"[▾] Usage","plain":true}')
+      expect(opened).toContain('"children":["[▾] ",{"type":"Text","props":{"bold":true')
+      expect(opened).toContain('"key":"section-usage-5H-show","label":"[▸] Show on band","plain":true}')
+      expect(opened).toContain('"children":["[▸] ",{"type":"Text","children":["Show on band"]}]')
+    })
+
+    test(`${surface}: every Button is plain; checkboxes and radio buttons hold their labels; steppers, resets and Enable bracketed`, async ($, on) => {
+      await start($, on, surface, RATE_LIMITS)
+      // usage-5H opens with its rows: Show on band, Burn rate and the rest.
+      const { pane, drawn } = await mountPanel($, surface, { open: ['usage', 'usage-5H'] })
+      await pane.press({ key: 'show-5H-expanded' })
+      const all = await drawn()
+      expect(all).toContain(`${toggle(surface, 'show-5H-plain', true)}Minimal","plain":true`)
+      expect(all).toContain(`${toggle(surface, 'show-5H-expanded', false)}Expanded","plain":true`)
+      expect(all).toContain(radio(surface, 'scope-session', 'This session', true))
+      expect(all).toContain(radio(surface, 'scope-global', 'All sessions', false))
+      expect(all).toContain(radio(surface, 'unit-5H-h', '%/h', true))
+      expect(all).toContain('"key":"window-5H-down","label":"[-]","plain":true')
+      expect(all).toContain('"key":"window-5H-up","label":"[+]","plain":true')
+      expect(all).toContain('"key":"reset-show-5H","label":"[reset]","plain":true')
+      expect(all).toContain('"key":"reset-session","label":"[Reset this session]","plain":true')
+      // No Button keeps the native frame; no mark is bracketed; and a label
+      // is never drawn beside its mark's Button.
+      expect(count(all, '"type":"Button"')).toBe(count(all, '"plain":true'))
+      for (const glyph of ['−', '[●]', '[○]', '[☑]', '[☐]']) expect(all).not.toContain(glyph)
+      expect(all).not.toContain('"children":["Minimal"]')
+      // The terminal never draws ☑ (it may be a wide emoji there).
+      if (surface === 'terminal') for (const glyph of ['☑', '☐', '◉']) expect(all).not.toContain(glyph)
+      // A usage window's alert is in every session's scope alone.
+      await pane.press({ key: 'scope-global' })
+      await pane.press({ key: 'section-usage-5H-alert' })
+      expect(await drawn()).toContain('"key":"alert-5H-enable","label":"[Enable]","plain":true')
+      expect(await drawn()).toContain('"key":"reset-defaults","label":"[Reset to defaults]","plain":true')
+    })
+
     test(`${surface}: a settings button beside the expanded band opens the panel; the collapsed views have none`, async ($, on) => {
       const { ui, band, tree, opens } = await start($, on, surface, RATE_LIMITS)
       // Outside the band's own drawing, so a press on it is the person's.
       expect(await tree()).toContain(`"key":"settings","label":"${surface === 'terminal' ? '[≡]' : '☰'}"`)
       expect(await band()).not.toContain('"key":"settings"')
       await ui.press({ key: 'settings' })
-      expect(opens).toEqual([{ id: 'token-watch-settings', title: 'Token Watch', columns: 52 }])
+      expect(opens).toEqual([{ id: 'token-watch-settings', title: 'TW Settings', columns: 52 }])
       await ui.pointer(rightClick)
       expect(await tree()).not.toContain('"key":"settings"')
     })
@@ -1467,7 +1562,7 @@ describe('settings panel', () => {
     expect(snapshotOf(writes).cache.keepWarm).toMatchObject({ maxPings: 30, maxMs: 4 * 60 * MINUTE })
     const { drawn } = await mountPanel($, 'terminal', { scope: 'global', open: ['usage', 'usage-5H'] })
     expect(await drawn()).toContain('"30 min"')
-    expect(await drawn()).toContain('"key":"unit-5H-h","label":"[●]"')
+    expect(await drawn()).toContain(radio('terminal', 'unit-5H-h', '%/h', true))
   })
 
   test('saved settings that are not an object are the defaults', async ($, on) => {
@@ -1477,15 +1572,15 @@ describe('settings panel', () => {
     expect(snapshotOf(writes).cache.keepWarm).toMatchObject({ maxPings: 8, maxMs: 8 * 60 * MINUTE })
   })
 
-  test('/context-bar settings opens the panel', async ($, on) => {
+  test('/token-watch settings opens the panel', async ($, on) => {
     const { opens } = await start($, on, 'terminal', RATE_LIMITS)
-    expect((await run($, 'settings')).text).toBe('Token Watch settings opened.')
-    expect(opens).toEqual([{ id: 'token-watch-settings', title: 'Token Watch', columns: 52 }])
+    expect((await run($, 'settings')).text).toBe('TW Settings opened.')
+    expect(opens).toEqual([{ id: 'token-watch-settings', title: 'TW Settings', columns: 52 }])
   })
 
-  test('where no surface places the panel, /context-bar settings closes it and says why', async ($, on) => {
+  test('where no surface places the panel, /token-watch settings closes it and says why', async ($, on) => {
     const { closes } = await start($, on, 'terminal', RATE_LIMITS, undefined, undefined, { paneUnplaced: 'no-surface' })
-    expect((await run($, 'settings')).text).toBe("Token Watch settings: the panel can't be shown here (no-surface).")
+    expect((await run($, 'settings')).text).toBe("TW Settings: the panel can't be shown here (no-surface).")
     expect(closes).toEqual(['token-watch-settings'])
   })
 
@@ -1579,9 +1674,8 @@ describe('settings scopes', () => {
     test(`${surface}: the panel edits this session by default: a toggle overrides the global setting here only, and reset gives it back`, async ($, on) => {
       const { band, saved } = await start($, on, surface, RATE_LIMITS)
       const { pane, drawn } = await mountPanel($, surface, { open: ['usage', 'usage-5H'] })
-      const [on1, off1] = surface === 'terminal' ? ['[●]', '[○]'] : ['◉', '○']
-      expect(await drawn()).toContain(`"key":"scope-session","label":"${on1}"`)
-      expect(await drawn()).toContain(`"key":"scope-global","label":"${off1}"`)
+      expect(await drawn()).toContain(radio(surface, 'scope-session', 'This session', true))
+      expect(await drawn()).toContain(radio(surface, 'scope-global', 'All sessions', false))
       await pane.press({ key: 'show-5H-expanded' })
       expect(saved.get(SESSION_KEY)).toMatchObject({ settings: { show: { '5H': { expanded: false } } } })
       expect(saved.get('settings')).toEqual({ warm: { mode: 'pings' } })
@@ -1785,7 +1879,7 @@ describe('burn rate', () => {
     expect(await drawn()).toContain('"6 h"')
     for (let i = 0; i < 3; i++) await pane.press({ key: 'window-WK-up' })
     expect(await drawn()).toContain('"24 h"')
-    expect(await drawn()).toContain('"key":"unit-WK-h","label":"[●]"')
+    expect(await drawn()).toContain(radio('terminal', 'unit-WK-h', '%/h', true))
     expect(await drawn()).toContain('"key":"unit-WK-day"')
     expect(await drawn()).not.toContain('"key":"unit-WK-min"')
   })
@@ -1905,7 +1999,7 @@ describe('usage across sessions', () => {
     saved.set('limits', [SEVEN_DAY, { ...FIVE_HOUR, percentUsed: 80 }])
     saved.set('limitsAt', NOW + 1)
     await clock.advance(30_000)
-    // /context-bar text takes a reading: its windows are this session's last
+    // /token-watch text takes a reading: its windows are this session's last
     // response's, older than the store's.
     await run($, 'text')
     expect(await band()).toContain('"80%"')
@@ -1991,7 +2085,7 @@ describe('notify and alerts', () => {
     await turn($)
     const { pane, drawn } = await mountPanel($, 'terminal', { scope: 'global', open: ['cache'] })
     expect(await drawn()).toContain('Cache time')
-    expect(await drawn()).toContain('"key":"warm-notify","label":"[●]"')
+    expect(await drawn()).toContain(radio('terminal', 'warm-notify', 'Notify', true))
     expect(await drawn()).toContain('"1 min before"')
     await pane.press({ key: 'lead-up' })
     expect(saved.get('settings')).toMatchObject({ warm: { mode: 'notify', lead: { '5m': 2 } } })
@@ -2147,23 +2241,418 @@ describe('context details', () => {
   })
 })
 
+// Another session's file in the sessions folder, written `ago` ms before NOW.
+const otherSession = (id: string, cwd: string, ago: number, extra: Record<string, unknown> = {}) => ({
+  file: {
+    schema: 1,
+    writtenAt: new Date(NOW - ago).toISOString(),
+    endedAt: null,
+    session: { id, cwd, root: cwd },
+    isWorking: false,
+    context: { total: 640_000, window: 1_000_000, percent: 64 },
+    cache: {
+      ttl: '1h',
+      expiresAt: new Date(NOW + 52 * MINUTE).toISOString(),
+      warm: true,
+      keepWarm: { on: true, mode: 'pings' },
+    },
+    ...extra,
+  },
+  mtimeMs: NOW - ago,
+})
+
+// A piece of a closed section's summary as drawn: in its colour, or dim.
+const tint = (text: string, color?: string) =>
+  `{"type":"Text","props":{${color ? `"color":"${color}"` : '"dimColor":true'}},"children":["${text}"]}`
+// A run of pieces, as the tree spells them side by side.
+const pieces = (...parts: string[]) => parts.join(',')
+// The band's level colours, and the countdown's warm and cold.
+const GREEN = '#8fd18f'
+const YELLOW = '#e8c66a'
+const RED = '#e06c6c'
+
+const SESSIONS_PANE = { ...PANE, requestId: 'token-watch-monitor', props: { ...PANE.props, title: 'TW Monitor' } }
+
+// The sessions panel mounted, its drawing as text.
+async function mountSessions($: Engine, surface: Surface) {
+  const pane = await $.ui.mount<Surface, 'Pane'>({ ...SESSIONS_PANE, surface })
+  return async () => JSON.stringify(await pane.drawn())
+}
+
+const lastFile = (sessionWrites: Write[]) => {
+  const write = written(sessionWrites)
+  return { name: write.path.slice(SESSIONS_DIR.length + 1), file: JSON.parse(write.text) }
+}
+
+describe('TW Monitor', () => {
+  test("each reading writes the session's own file: its folder, context and cache, in the first slot", async ($, on) => {
+    const { sessionWrites, writes, clock } = await boot($, on, 'terminal', RATE_LIMITS)
+    expect(writes.length).toBe(1)
+    const { name, file } = lastFile(sessionWrites)
+    expect(name).toBe('session-1.json')
+    expect(file).toEqual({
+      schema: 1,
+      writtenAt: '2026-10-03T12:00:00.000Z',
+      endedAt: null,
+      session: { id: 'sess-1', cwd: 'C:/proj', root: 'C:/proj' },
+      isWorking: false,
+      context: { total: 212_200, window: 1_000_000, percent: 21 },
+      cache: { ttl: '1h', expiresAt: null, warm: false, keepWarm: { on: false, mode: 'pings' } },
+    })
+    // Every 30 s again, so the others can tell it is alive.
+    await clock.advance(30_000)
+    expect(sessionWrites.length).toBe(2)
+    expect(lastFile(sessionWrites).file.writtenAt).toBe('2026-10-03T12:00:30.000Z')
+  })
+
+  test('a slot whose session ended or went stale is reused; a live one is not', async ($, on) => {
+    const { sessionWrites } = await boot($, on, 'terminal', RATE_LIMITS, {
+      sessionFiles: {
+        'session-1.json': otherSession('live', 'C:/a', 10_000),
+        'session-2.json': otherSession('stale', 'C:/b', 5 * MINUTE),
+        'session-3.json': otherSession('ended', 'C:/c', 10_000, { endedAt: new Date(NOW - 10_000).toISOString() }),
+      },
+    })
+    expect(lastFile(sessionWrites).name).toBe('session-2.json')
+  })
+
+  test('with every slot live, a new one after them', async ($, on) => {
+    const { sessionWrites } = await boot($, on, 'terminal', RATE_LIMITS, {
+      sessionFiles: {
+        'session-1.json': otherSession('a', 'C:/a', 10_000),
+        'session-2.json': otherSession('b', 'C:/b', 10_000),
+      },
+    })
+    expect(lastFile(sessionWrites).name).toBe('session-3.json')
+  })
+
+  test('a torn file still being written is not taken', async ($, on) => {
+    const { sessionWrites } = await boot($, on, 'terminal', RATE_LIMITS, {
+      sessionFiles: { 'session-1.json': { file: '{"schema":1,"writ', mtimeMs: NOW - 1_000 } },
+    })
+    expect(lastFile(sessionWrites).name).toBe('session-2.json')
+  })
+
+  test('after a reload the session finds its own slot by its id', async ($, on) => {
+    const { sessionWrites } = await boot($, on, 'terminal', RATE_LIMITS, {
+      sessionFiles: {
+        'session-1.json': otherSession('stale', 'C:/b', 5 * MINUTE),
+        'session-2.json': otherSession('sess-1', 'C:/proj', 10_000),
+      },
+    })
+    expect(lastFile(sessionWrites).name).toBe('session-2.json')
+  })
+
+  test('two sessions picked the same slot: the one written over moves on', async ($, on) => {
+    const { sessionWrites, files, clock } = await boot($, on, 'terminal', RATE_LIMITS)
+    expect(lastFile(sessionWrites).name).toBe('session-1.json')
+    const other = otherSession('other', 'C:/a', 0)
+    files.set(`${SESSIONS_DIR}/session-1.json`, { text: JSON.stringify(other.file), mtimeMs: NOW + 5_000 })
+    await clock.advance(30_000)
+    expect(lastFile(sessionWrites).name).toBe('session-2.json')
+    expect(JSON.parse(files.get(`${SESSIONS_DIR}/session-1.json`)!.text).session.id).toBe('other')
+  })
+
+  test('a session that ends says so in its file; a /clear goes on under the new id', async ($, on) => {
+    const { sessionWrites } = await boot($, on, 'terminal', RATE_LIMITS)
+    await $.session.end({ reason: 'clear', sessionId: 'sess-1', resume: { id: 'sess-1' } })
+    expect(lastFile(sessionWrites).file.endedAt).toBeNull()
+    await $.session.end({ reason: 'prompt_input_exit', sessionId: 'sess-1', resume: { id: 'sess-1' } })
+    expect(lastFile(sessionWrites).file.endedAt).toBe('2026-10-03T12:00:00.000Z')
+  })
+
+  test('the snapshot option turns the session files off too', { options: { snapshot: false } }, async ($, on) => {
+    const { sessionWrites, clock } = await boot($, on, 'terminal', RATE_LIMITS)
+    await clock.advance(30_000)
+    expect(sessionWrites.length).toBe(0)
+  })
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    test(`${surface}: a sessions button under the settings button in the expanded view opens the panel`, async ($, on) => {
+      const { ui, tree, opens } = await start($, on, surface, RATE_LIMITS)
+      expect(await tree()).toContain(`"key":"sessions","label":"${surface === 'terminal' ? '[#]' : '⊞'}"`)
+      await ui.press({ key: 'sessions' })
+      expect(opens).toEqual([{ id: 'token-watch-monitor', title: 'TW Monitor', columns: 52 }])
+      await ui.pointer(rightClick)
+      expect(await tree()).not.toContain('"key":"sessions"')
+    })
+  }
+
+  test('the panel: this session first, then the live others by folder, each with its context and countdown', async ($, on) => {
+    const { opens } = await start($, on, 'terminal', RATE_LIMITS, undefined, undefined, {
+      sessionFiles: {
+        'session-1.json': otherSession('zz', 'C:/work/web', 10_000),
+        'session-2.json': otherSession('aa', 'C:/work/api', 20_000, {
+          cache: { ttl: '5m', expiresAt: new Date(NOW - MINUTE).toISOString(), warm: false, keepWarm: { on: false, mode: 'notify' } },
+        }),
+        'session-3.json': otherSession('old', 'C:/work/gone', 5 * MINUTE),
+        'session-4.json': otherSession('done', 'C:/work/done', 10_000, { endedAt: new Date(NOW - 5_000).toISOString() }),
+      },
+    })
+    expect((await run($, 'monitor')).text).toBe('TW Monitor opened.')
+    expect(opens.at(-1)).toEqual({ id: 'token-watch-monitor', title: 'TW Monitor', columns: 52 })
+    const drawn = await (await mountSessions($, 'terminal'))()
+    const at = (text: string) => drawn.indexOf(text)
+    expect(drawn).toContain('"› proj"')
+    expect(drawn).not.toContain('this session')
+    expect(drawn).not.toContain('(this session)')
+    expect(drawn).toContain('"21%"')
+    expect(drawn).toContain('"212k / 1M"')
+    // This session has had no response: no countdown yet.
+    expect(drawn).toContain('"No data"')
+    expect(drawn).toContain('"64%"')
+    expect(drawn).toContain('"52m"')
+    expect(drawn).toContain('"keep-warm: Pings"')
+    expect(drawn).toContain('"Cold"')
+    expect(drawn).not.toContain('gone')
+    expect(drawn).not.toContain('done')
+    expect(at('"› proj"')).toBeLessThan(at('"api"'))
+    expect(at('"api"')).toBeLessThan(at('"web"'))
+    // Meters: the context at 64% is 6 of 10 cells.
+    expect(drawn).toContain('"▄▄▄▄▄▄"')
+    // The account's usage windows once, on top, each with its reset countdown.
+    expect(at('"Usage"')).toBeLessThan(at('"› proj"'))
+    expect(drawn).toContain('"5H"')
+    expect(drawn).toContain('"62%"')
+    expect(drawn).toContain('"2h 14m"')
+    expect(drawn).toContain('"WK"')
+    expect(drawn).toContain('"31%"')
+    expect(drawn).toContain('"3d 4h"')
+    expect(count(drawn, '"children":["5H"]')).toBe(1)
+  })
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    test(`${surface}: each usage window's burn rate, red when it would fill before its reset, green when not`, async ($, on) => {
+      const limits = [...RATE_LIMITS]
+      const { clock } = await start($, on, surface, limits)
+      await clock.advance(10 * MINUTE)
+      fiveHourAt(limits, 67.4)
+      await $.session.measure(MEASURE)
+      await run($, 'monitor')
+      const drawn = await (await mountSessions($, surface))()
+      // 5 points in 10 minutes fills the 5H window before its reset; WK is flat.
+      expect(drawn).toContain('"color":"#e06c6c","wrap":"truncate"},"children":["30%/h"]')
+      expect(drawn).toContain('"color":"#8fd18f","wrap":"truncate"},"children":["0.0%/h"]')
+      // The labels keep two cells of slack on the desktop, so "CTX" is not cut.
+      expect(drawn).toContain(`{"width":${surface === 'terminal' ? 3 : 5},"flexShrink":0}`)
+    })
+  }
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    test(`${surface}: Usage, a rule, then Sessions; every section open at first, each closing to a summary`, async ($, on) => {
+      await start($, on, surface, RATE_LIMITS, undefined, undefined, {
+        sessionFiles: { 'session-1.json': otherSession('zz', 'C:/work/web', 10_000) },
+      })
+      await run($, 'monitor')
+      const pane = await $.ui.mount<Surface, 'Pane'>({ ...SESSIONS_PANE, surface })
+      const drawn = async () => JSON.stringify(await pane.drawn())
+      // A heading's label: the glyph bracketed on both surfaces, then its words.
+      const heading = (glyph: string, words: string) => `[${glyph}] ${words}`
+      const open = '▾'
+      const shut = '▸'
+      const first = await drawn()
+      // Each heading is its Button: the glyph and the words, one press.
+      const headings: [string, string][] = [['usage', 'Usage'], ['sessions', 'Sessions'], ['session-sess-1', '› proj'], ['session-zz', 'web']]
+      for (const [id, words] of headings) {
+        expect(first).toContain(`"key":"fold-${id}","label":"${heading(open, words)}"`)
+      }
+      // The session's name alone is in its Button; its pin is at the row's
+      // right edge, after a spacer that takes the room between.
+      expect(first).toContain(`"label":"${heading(open, '› proj')}","plain":true}`)
+      expect(first).toContain(
+        `{"type":"Box","props":{"flexGrow":1}},{"type":"Box","props":{"flexShrink":0},"children":[{"type":"Button","props":{"key":"pin-sess-1","label":"${surface === 'terminal' ? '[ ]' : '☐'}"`,
+      )
+      // The rule: a line of 50 cells in a terminal (the body less its
+      // margins), a hairline on the desktop.
+      const rule = first.indexOf(surface === 'terminal' ? `"${'─'.repeat(50)}"` : '"key":"rule"')
+      expect(rule).toBeGreaterThan(first.indexOf('"Usage"'))
+      expect(rule).toBeLessThan(first.indexOf('"Sessions"'))
+      // A session closes to its heading and a summary.
+      await pane.press({ key: 'fold-session-sess-1' })
+      const one = await drawn()
+      expect(one).toContain(`"key":"fold-session-sess-1","label":"${heading(shut, '› proj')}"`)
+      expect(one).toContain(pieces(tint('CTX '), tint('21%', GREEN), tint(' · '), tint('TTL '), tint('No data', RED)))
+      expect(one).not.toContain('"212k / 1M"')
+      expect(one).toContain('"640k / 1M"')
+      // Usage closes to the windows' percentages; Sessions to the count.
+      await pane.press({ key: 'fold-usage' })
+      await pane.press({ key: 'fold-sessions' })
+      const all = await drawn()
+      expect(all).toContain(pieces(tint('5H '), tint('62%', YELLOW), tint(' · WK '), tint('31%', GREEN)))
+      expect(all).not.toContain('"2h 14m"')
+      expect(all).toContain(tint('2'))
+      expect(all).not.toContain('"web"')
+      // And opens again.
+      await pane.press({ key: 'fold-sessions' })
+      expect(await drawn()).toContain('"web"')
+    })
+  }
+
+  test("a session's figures in their colours, open or closed: the context by level; the countdown green with keep-warm on, grey off, red cold or without data", async ($, on) => {
+    const warmOff = { ttl: '1h', expiresAt: new Date(NOW + 20 * MINUTE).toISOString(), warm: true, keepWarm: { on: false, mode: 'notify' } }
+    const cold = { ttl: '5m', expiresAt: new Date(NOW - MINUTE).toISOString(), warm: false, keepWarm: { on: false, mode: 'notify' } }
+    await start($, on, 'desktop', RATE_LIMITS, undefined, undefined, {
+      sessionFiles: {
+        'session-1.json': otherSession('on', 'C:/work/a-on', 10_000),
+        'session-2.json': otherSession('off', 'C:/work/b-off', 10_000, {
+          context: { total: 900_000, window: 1_000_000, percent: 90 },
+          cache: warmOff,
+        }),
+        'session-3.json': otherSession('cold', 'C:/work/c-cold', 10_000, { cache: cold }),
+      },
+    })
+    await run($, 'monitor')
+    const pane = await $.ui.mount<Surface, 'Pane'>({ ...SESSIONS_PANE, surface: 'desktop' })
+    // Open, the TTL lines follow the same rule; a grey countdown's meter is
+    // filled light grey. This session has had no response: red, no data.
+    const open = JSON.stringify(await pane.drawn())
+    const value = (text: string, color?: string) =>
+      `{"type":"Text","props":{${color ? `"color":"${color}"` : '"dimColor":true'},"wrap":"truncate"},"children":["${text}"]}`
+    expect(open).toContain(value('52m', GREEN))
+    expect(open).toContain(value('20m'))
+    expect(open).toContain(value('Cold', RED))
+    expect(open).toContain(value('No data', RED))
+    expect(count(open, '"backgroundColor":"#8a8f99"')).toBe(1)
+    for (const id of ['on', 'off', 'cold']) await pane.press({ key: `fold-session-${id}` })
+    const drawn = JSON.stringify(await pane.drawn())
+    expect(drawn).toContain(pieces(tint('64%', YELLOW), tint(' · '), tint('TTL '), tint('52m', GREEN)))
+    expect(drawn).toContain(pieces(tint('90%', RED), tint(' · '), tint('TTL '), tint('20m')))
+    expect(drawn).toContain(pieces(tint('TTL '), tint('Cold', RED)))
+  })
+
+  test('a pinned session comes after this one and before the unpinned; [ ] and [*], saved for every session', async ($, on) => {
+    const { saved } = await start($, on, 'terminal', RATE_LIMITS, undefined, undefined, {
+      sessionFiles: {
+        'session-1.json': otherSession('aa', 'C:/work/alpha', 10_000),
+        'session-2.json': otherSession('zz', 'C:/work/zulu', 10_000),
+      },
+    })
+    await run($, 'monitor')
+    const pane = await $.ui.mount<Surface, 'Pane'>({ ...SESSIONS_PANE, surface: 'terminal' })
+    const drawn = async () => JSON.stringify(await pane.drawn())
+    const order = async () => {
+      const d = await drawn()
+      return ['› proj', 'alpha', 'zulu'].sort((a, b) => d.indexOf(`"label":"[▾] ${a}"`) - d.indexOf(`"label":"[▾] ${b}"`))
+    }
+    // By folder at first; every session has a pin, this one too.
+    expect(await order()).toEqual(['› proj', 'alpha', 'zulu'])
+    for (const id of ['sess-1', 'aa', 'zz']) expect(await drawn()).toContain(`"key":"pin-${id}","label":"[ ]","plain":true,"dimColor":true`)
+    // The desktop's are the checkbox's, the same width on and off.
+    const desk = await $.ui.mount<Surface, 'Pane'>({ ...SESSIONS_PANE, surface: 'desktop' })
+    expect(JSON.stringify(await desk.drawn())).toContain('"key":"pin-aa","label":"☐","plain":true,"dimColor":true')
+    await pane.press({ key: 'pin-zz' })
+    expect(saved.get('pinned')).toEqual({ zz: NOW })
+    expect(await drawn()).toContain('"key":"pin-zz","label":"[*]","plain":true}')
+    expect(JSON.stringify(await desk.drawn())).toContain('"key":"pin-zz","label":"☑","plain":true}')
+    // Pinned: above alpha, still under this session.
+    expect(await order()).toEqual(['› proj', 'zulu', 'alpha'])
+    await pane.press({ key: 'pin-zz' })
+    expect(saved.get('pinned')).toEqual({})
+    expect(await order()).toEqual(['› proj', 'alpha', 'zulu'])
+  })
+
+  test("another session's pin reaches this one; an old pin whose session is gone is dropped, a running one kept", async ($, on) => {
+    const old = NOW - 31 * 24 * 60 * MINUTE
+    const { saved, clock, files } = await start($, on, 'terminal', RATE_LIMITS, undefined, {
+      pinned: { gone: old, aa: old },
+    }, {
+      sessionFiles: {
+        'session-1.json': otherSession('aa', 'C:/work/alpha', 10_000),
+        'session-2.json': otherSession('zz', 'C:/work/zulu', 10_000),
+      },
+    })
+    await run($, 'monitor')
+    expect(saved.get('pinned')).toEqual({ aa: old })
+    const pane = await $.ui.mount<Surface, 'Pane'>({ ...SESSIONS_PANE, surface: 'terminal' })
+    expect(JSON.stringify(await pane.drawn())).toContain('"key":"pin-aa","label":"[*]"')
+    // Another session pins zulu; within 30 s this one shows it.
+    saved.set('pinned', { aa: old, zz: NOW })
+    for (const name of ['session-1.json', 'session-2.json']) {
+      const f = files.get(`${SESSIONS_DIR}/${name}`)!
+      files.set(`${SESSIONS_DIR}/${name}`, { ...f, text: f.text.replace(/"writtenAt":"[^"]*"/, `"writtenAt":"${new Date(NOW + 30_000).toISOString()}"`) })
+    }
+    await clock.advance(30_000)
+    expect(JSON.stringify(await pane.drawn())).toContain('"key":"pin-zz","label":"[*]"')
+  })
+
+  test("a session is named by its project root, not the directory a shell cd took it to", async ($, on) => {
+    const { sessionWrites } = await start($, on, 'terminal', RATE_LIMITS, undefined, undefined, { cwd: 'C:/proj/.claude-plugin/types' })
+    expect(lastFile(sessionWrites).file.session).toEqual({ id: 'sess-1', cwd: 'C:/proj/.claude-plugin/types', root: 'C:/proj' })
+    await run($, 'monitor')
+    const drawn = await (await mountSessions($, 'terminal'))()
+    expect(drawn).toContain('"› proj"')
+    expect(drawn).not.toContain('"types"')
+  })
+
+  test('an older file with no root is named by its directory', async ($, on) => {
+    const older = otherSession('old-file', 'C:/work/legacy', 10_000)
+    delete (older.file.session as { root?: string }).root
+    await start($, on, 'terminal', RATE_LIMITS, undefined, undefined, { sessionFiles: { 'session-1.json': older } })
+    await run($, 'monitor')
+    expect(await (await mountSessions($, 'terminal'))()).toContain('"legacy"')
+  })
+
+  test('with no usage windows (an API key), the panel has no Usage heading', async ($, on) => {
+    await start($, on, 'terminal', [])
+    await run($, 'monitor')
+    const drawn = await (await mountSessions($, 'terminal'))()
+    expect(drawn).not.toContain('"Usage"')
+    expect(drawn).toContain('"› proj"')
+  })
+
+  test('while the panel is open, the others are read again every 30 s', async ($, on) => {
+    const { files, clock } = await start($, on, 'desktop', RATE_LIMITS)
+    await run($, 'monitor')
+    const drawn = await mountSessions($, 'desktop')
+    expect(await drawn()).toContain('No other session is running')
+    const other = otherSession('new', 'C:/work/new', 0)
+    files.set(`${SESSIONS_DIR}/session-9.json`, { text: JSON.stringify(other.file), mtimeMs: NOW })
+    await clock.advance(30_000)
+    expect(await drawn()).toContain('"new"')
+    expect(await drawn()).not.toContain('No other session is running')
+  })
+
+  test('two sessions in one folder are told apart by id', async ($, on) => {
+    await start($, on, 'terminal', RATE_LIMITS, undefined, undefined, {
+      sessionFiles: { 'session-1.json': otherSession('abcdef123456', 'D:/elsewhere/proj', 10_000) },
+    })
+    await run($, 'monitor')
+    const drawn = await (await mountSessions($, 'terminal'))()
+    expect(drawn).toContain('"children":["abcdef12"]')
+    // On one line, cut at the edge, and cut before the title.
+    expect(drawn).toContain(
+      '{"type":"Box","props":{"flexShrink":100,"minWidth":0},"children":[{"type":"Text","props":{"dimColor":true,"wrap":"truncate"},"children":["sess-1"]}]}',
+    )
+    // This session is marked by a › before its name; the other is not.
+    expect(count(drawn, '"label":"[▾] proj"')).toBe(1)
+    expect(count(drawn, '"label":"[▾] › proj"')).toBe(1)
+  })
+
+  test('with the snapshot option off, the panel shows this session and says why no others', { options: { snapshot: false } }, async ($, on) => {
+    await start($, on, 'terminal', RATE_LIMITS, undefined, undefined, {
+      sessionFiles: { 'session-1.json': otherSession('zz', 'C:/work/web', 10_000) },
+    })
+    await run($, 'monitor')
+    const drawn = await (await mountSessions($, 'terminal'))()
+    expect(drawn).toContain('"› proj"')
+    expect(drawn).not.toContain('"web"')
+    expect(drawn).toContain('usage snapshot option')
+  })
+})
+
 const LINE = '5H 62% (2h 14m) · WK 31% (3d 4h) · CTX 21% (212k / 1M)'
 const MEASURE: SessionMeasureInput = { context: { tokens: 212_200, window: 1_000_000, percent: 21 }, rateLimits: RATE_LIMITS, changed: ['context'] }
 const SNAPSHOT_PATH = 'C:/Users/test/.claude/token-watch/usage.json'
 const run = ($: Engine, args: string) =>
   $.command.run({
-    command: 'context-bar',
+    command: 'token-watch',
     args,
     origin: { kind: 'composer' },
     presentation: { isFullscreen: false, columns: 120 },
   })
-// The engine hands $.fs.write the path resolved to the platform's own form
-// (backslashes on Windows), whatever string the mod gave; the mod's own
-// spelling is what /context-bar file reports.
-const slash = (p: string) => p.replace(/\\/g, '/')
 
-describe('context-bar as text', () => {
-  test('where nothing draws (the VS Code chat panel), /context-bar answers the reading and hides nothing', async ($, on) => {
+describe('token-watch as text', () => {
+  test('where nothing draws (the VS Code chat panel), /token-watch answers the reading and hides nothing', async ($, on) => {
     const { saved } = await boot($, on, null, RATE_LIMITS, { surfaces: ['vscode'] })
     expect((await run($, '')).text).toBe(LINE)
     expect((await run($, '')).text).toBe(LINE)
@@ -2176,12 +2665,12 @@ describe('context-bar as text', () => {
   })
 
   for (const surface of ['terminal', 'desktop'] as const) {
-    test(`${surface}: /context-bar text answers the line and leaves the band as it is`, async ($, on) => {
+    test(`${surface}: /token-watch text answers the line and leaves the band as it is`, async ($, on) => {
       const { band, saved } = await start($, on, surface, RATE_LIMITS)
       expect((await run($, 'text')).text).toBe(LINE)
       expect(await band()).toContain('"CTX"')
       expect(saved.get('isShown')).toBeUndefined()
-      expect((await run($, 'nonsense')).text).toBe('Usage: /context-bar [text|file|settings]')
+      expect((await run($, 'nonsense')).text).toBe('Usage: /token-watch [text|file|settings|monitor]')
       expect((await run($, '')).text).toBe('Token Watch hidden.')
     })
   }
@@ -2329,13 +2818,13 @@ describe('usage snapshot', () => {
     expect((await run($, 'file')).text).toContain('off')
   })
 
-  test('with no home directory there is nowhere to write, and /context-bar file says so', async ($, on) => {
+  test('with no home directory there is nowhere to write, and /token-watch file says so', async ($, on) => {
     const { writes } = await boot($, on, 'terminal', RATE_LIMITS, { env: {} })
     expect(writes.length).toBe(0)
     expect((await run($, 'file')).text).toContain('nowhere to write')
   })
 
-  test('/context-bar file names the snapshot and its age', async ($, on) => {
+  test('/token-watch file names the snapshot and its age', async ($, on) => {
     const { clock } = await boot($, on, 'terminal', RATE_LIMITS)
     await clock.advance(12_000)
     expect((await run($, 'file')).text).toBe(`Token Watch snapshot: ${SNAPSHOT_PATH} (written 12s ago).`)

@@ -225,6 +225,26 @@ export type Snapshot = {
   cache: SnapshotCache
 }
 
+// One session's file under ~/.claude/token-watch/sessions/, which every
+// session's TW Monitor reads: where the session runs (its project root,
+// which names it, and the directory it is in now, which a shell `cd` moves),
+// its context and its prompt cache. A session ended (not cleared or resumed)
+// says when.
+export type SessionSnapshot = {
+  schema: 1
+  writtenAt: string
+  endedAt: string | null
+  session: { id: string | null; cwd: string | null; root: string | null }
+  isWorking: boolean
+  context: { total: number; window: number; percent: number } | null
+  cache: {
+    ttl: Ttl
+    expiresAt: string | null
+    warm: boolean
+    keepWarm: { on: boolean; mode: WarmMode }
+  }
+}
+
 // What the hooks module hands the band's Client.
 export type BandProps = {
   reading: Reading
@@ -284,6 +304,13 @@ declare module 'claude-code' {
       // The alert levels this session's context has crossed, and not fallen
       // back under since.
       ctxAlerted: number[]
+      // The other live sessions on this device, as TW Monitor last
+      // read their files, and the panel's sections closed (all open at first).
+      sessions: SessionSnapshot[]
+      sessionsClosed: string[]
+      // The sessions pinned in TW Monitor, by id, with when each was pinned:
+      // shared through the store, so every session's TW Monitor has them.
+      pinned: Record<string, number>
     }
   }
 }

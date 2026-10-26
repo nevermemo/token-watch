@@ -1,5 +1,5 @@
 // Shared by the hooks module and the band: how Token Watch names, orders and
-// spells its figures, so the band, the /context-bar reading and the usage
+// spells its figures, so the band, the /token-watch reading and the usage
 // snapshot all say the same thing.
 
 import type { Cap, CacheState, KeepWarm, Limit, Part, Reading, UsagePart } from '../types'

@@ -2,9 +2,9 @@
 // window Claude Code reports), the context window and the prompt cache's
 // countdown as thin bars above the prompt. A right click cycles the band's
 // three views, the cache timer and the keep-warm button turn keep-warm on and
-// off, and /context-bar shows or hides it.
+// off, and /token-watch shows or hides it.
 //
-// session.start: register /context-bar, restore the saved view (or the one
+// session.start: register /token-watch, restore the saved view (or the one
 //   the 1.1 keys meant), the settings (the global ones and this session's
 //   own, its id's settings kept 30 days) and the last usage windows seen (a new session has none until its first
 //   response), read the TTL controls once (three environment variables and
@@ -22,15 +22,16 @@
 //   restarts.
 // session.end: keep-warm off; where the process goes on under another session
 //   (/clear, a resume, a logout), the cache is forgotten too.
-// command.run (context-bar): show or hide the band where it draws; where it
+// command.run (token-watch): show or hide the band where it draws; where it
 //   cannot be drawn (the VS Code extension's chat panel, a headless run),
 //   answer with the reading as one line of text. `text` asks for that line
 //   anywhere, `file` for the snapshot's path, `settings` opens the settings
-//   panel.
+//   panel, `monitor` TW Monitor.
 // ui.render (AbovePrompt): the band, drawn by the Client in ./band.tsx, which
 //   lays itself out to the room it is given and reports clicks; beside it, the
 //   settings button ([≡] in a terminal, ☰ on the desktop), a Button of this
-//   module's own, so its press is the person's.
+//   module's own, so its press is the person's, and under it in the expanded
+//   view the sessions button ([#] in a terminal, ⊞ on the desktop).
 // ui.message: the band was clicked: { action: 'cycle' } (right click) moves
 //   to the next view, { action: 'keep-warm' } (the timer or the keep-warm
 //   button) toggles keep-warm, { action: 'refresh-caps' } starts its caps over.
@@ -42,6 +43,9 @@
 //   cache keep-warm stays off, so nothing spends out of sight. Every 30 s the
 //   global settings are read again, so a change another session made reaches
 //   this one.
+// ui.render (Pane, TW Monitor): every live session on this device,
+//   from the sessions' files: its folder, its context and its cache's
+//   countdown.
 //
 // Burn rates: each reading's usage windows are kept in the store where they
 // moved (./burn.ts), shared by every session since the windows are the
@@ -51,8 +55,10 @@
 // estimated locally, so it costs no token-count request, and the plan's
 // rate-limit windows as the status line has them (none off a subscription).
 // Each reading is also written to ~/.claude/token-watch/usage.json, the
-// snapshot a companion (Token Watch for VS Code) reads; the plugin's
-// `snapshot` option turns that off.
+// snapshot a companion (Token Watch for VS Code) reads, and to this session's
+// own file in ~/.claude/token-watch/sessions/, which TW Monitor of
+// every session on the device reads; the plugin's `snapshot` option turns
+// both off.
 //
 // Keep-warm's mode (the settings): Pings, as below; Notify, no pings, one
 // notification ($.ui.notify) a lead time before each countdown runs out,
@@ -81,6 +87,7 @@ import type {
   Pace,
   Reading,
   Scope,
+  SessionSnapshot,
   SettingsOverride,
   Slice,
   Snapshot,
@@ -138,8 +145,8 @@ import {
   windowText,
 } from './settings'
 import type { Path } from './settings'
-import { addReadings, fullAt, ratePerHour, readHistory } from './burn'
-import { countdown, duration, hmmss, label, partOf, readingLine, short, sorted } from './format'
+import { addReadings, fullAt, ratePerHour, rateText, readHistory } from './burn'
+import { countdown, duration, hmmss, label, levelColor, partOf, readingLine, short, sorted } from './format'
 
 const reading = atom({ plugin: 'token-watch', key: 'reading' } as const, null)
 const isShown = atom({ plugin: 'token-watch', key: 'isShown' } as const, true)
@@ -159,6 +166,9 @@ const scope = atom({ plugin: 'token-watch', key: 'scope' } as const, 'session')
 const openSections = atom({ plugin: 'token-watch', key: 'openSections' } as const, [])
 const ctxAlerted = atom({ plugin: 'token-watch', key: 'ctxAlerted' } as const, [])
 const history = atom({ plugin: 'token-watch', key: 'history' } as const, {})
+const sessions = atom({ plugin: 'token-watch', key: 'sessions' } as const, [])
+const sessionsClosed = atom({ plugin: 'token-watch', key: 'sessionsClosed' } as const, [])
+const pinned = atom({ plugin: 'token-watch', key: 'pinned' } as const, {})
 
 // The context's details lines, as the panel names them.
 const DETAILS: ['mcp' | 'memory' | 'skills', string][] = [
@@ -177,7 +187,39 @@ const WARM_MODE_NOTES: Record<WarmMode, string> = {
 
 // The settings panel's pane id, and its width when docked beside the transcript.
 const SETTINGS = 'token-watch-settings'
+const SETTINGS_TITLE = 'TW Settings'
 const SETTINGS_COLUMNS = 52
+
+// TW Monitor's pane id and width; its meters' cells and colours (the
+// band's), and its lines' label, value and note columns.
+const SESSIONS = 'token-watch-monitor'
+const SESSIONS_TITLE = 'TW Monitor'
+const SESSIONS_COLUMNS = 52
+const SESSION_METER = 10
+const SESSION_GLYPH = '\u2584'
+const SESSION_TRACK = '#3d4250'
+const SESSION_WARM = '#8fd18f'
+const SESSION_COLD = '#e06c6c'
+// A warm countdown's fill with keep-warm off: grey, lighter than the track.
+const SESSION_IDLE = '#8a8f99'
+const SESSION_LABEL_WIDTH = 3
+// A heading's notes give way this many times faster than its title when the
+// row is short.
+const NOTES_SHRINK = 100
+
+// TW Monitor's mark for this session, before its name: one cell everywhere,
+// where ▶ may draw as an emoji.
+const THIS_SESSION = '›'
+
+// A piece of a closed section's summary: in its colour, or dim without one.
+type SummaryPart = { text: string; color?: string }
+const SESSION_VALUE_WIDTH = 'No data'.length + 1
+const SESSION_NOTE_WIDTH = '23h 59m'.length + 1
+
+// The sessions button's label: a squared plus on the desktop; in a terminal
+// "#", which every monospace font centres in its cell, as it does not \u229e.
+const SESSIONS_MARK = '\u229e'
+const SESSIONS_MARK_TERMINAL = '#'
 
 // The settings button's label, a "menu" glyph: U+2630 on the desktop; in a
 // terminal U+2261, since recent Unicode makes the trigram U+2630 two cells
@@ -207,8 +249,17 @@ const COLORS: Record<string, string> = {
 // is written again while the session is alive, and how long another
 // session's snapshot stays its own before this session takes the file over.
 const SNAPSHOT_PARTS = ['.claude', 'token-watch', 'usage.json']
+// Each session's own file, for TW Monitor: a numbered slot in this
+// folder, which a later session reuses once the one before it has ended or
+// gone stale (no file is ever deleted), so the folder holds as many files as
+// sessions ever ran at once.
+const SESSIONS_PARTS = ['.claude', 'token-watch', 'sessions']
+const SLOT_NAME = /^session-(\d+)\.json$/
 const HEARTBEAT_MS = 30_000
 const SNAPSHOT_FRESH_MS = 120_000
+
+// A session's end after which the process goes on under another session.
+const CONTINUES = new Set<string>(['clear', 'resume', 'logout'])
 
 // The least a ping waits once armed.
 const MIN_PING_WAIT_MS = 1_000
@@ -222,6 +273,13 @@ let snapshotOn = true
 let snapshotPath: string | null = null
 let lastWriteMs = 0
 let lastKey = ''
+// The sessions folder, this session's slot in it (found again after a
+// reload by the id in it), the id it last wrote there, and that write.
+let sessionsDir: string | null = null
+let slotPath: string | null = null
+let slotId: string | null = null
+let lastSlotMs = 0
+let lastSlotKey = ''
 let pingTimer: Timer | null = null
 let notifyTimer: Timer | null = null
 let pingOut: { seq: number; sentAt: number } | null = null
@@ -234,10 +292,10 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     const result = await next(e)
     await $.command.register({
-      name: 'context-bar',
+      name: 'token-watch',
       description:
-        'Show or hide the Token Watch band (plan usage, context and the prompt cache countdown) above the prompt; right-click it to cycle its views; "text" for the reading as a line, "file" for the usage snapshot, "settings" for the settings panel',
-      argumentHint: '[text|file|settings]',
+        'Show or hide the Token Watch band (plan usage, context and the prompt cache countdown) above the prompt; right-click it to cycle its views; "text" for the reading as a line, "file" for the usage snapshot, "settings" for TW Settings, "monitor" for TW Monitor (every session\'s context and cache)',
+      argumentHint: '[text|file|settings|monitor]',
     })
     const shown = await $.store.get('isShown')
     await update($, isShown, () => shown !== false)
@@ -258,7 +316,8 @@ export const register: Register = (on, options) => {
       if (typeof savedAt === 'number') await update($, limitsAt, () => savedAt)
     }
     if (snapshotOn) {
-      snapshotPath = await resolveSnapshotPath($)
+      snapshotPath = await homePath($, SNAPSHOT_PARTS)
+      sessionsDir = await homePath($, SESSIONS_PARTS)
     }
     const inputs = await readTtlInputs($)
     await update($, ttlInputs, () => inputs)
@@ -350,7 +409,7 @@ export const register: Register = (on, options) => {
     // one's countdown says nothing about.
     stopPingTimer()
     await update($, keepWarm, () => KEEP_WARM_OFF)
-    if (e.reason === 'clear' || e.reason === 'resume' || e.reason === 'logout') {
+    if (CONTINUES.has(e.reason)) {
       await update($, cache, c => ({
         ...c,
         lastResponseAt: null,
@@ -364,28 +423,33 @@ export const register: Register = (on, options) => {
       await loadSettings($, true)
     }
     await writeSnapshot($)
+    // The session is over (the process goes on only under another one, which
+    // keeps the slot): its file says so, and the slot is free for the next.
+    if (!CONTINUES.has(e.reason)) await writeSessionFile($, true, true)
     return result
   })
 
-  on('command.run', { command: 'context-bar' }, async ($, e) => {
+  on('command.run', { command: 'token-watch' }, async ($, e) => {
     const arg = e.args.trim().toLowerCase()
     if (arg === 'file') {
       return { text: await snapshotStatus($) }
     }
-    if (arg === 'settings') {
-      const opened = await openSettings($)
-      if (opened.isPlaced) return { text: 'Token Watch settings opened.' }
+    if (arg === 'settings' || arg === 'monitor') {
+      const id = arg === 'settings' ? SETTINGS : SESSIONS
+      const title = arg === 'settings' ? SETTINGS_TITLE : SESSIONS_TITLE
+      const opened = arg === 'settings' ? await openSettings($) : await openSessions($)
+      if (opened.isPlaced) return { text: `${title} opened.` }
       // Not placed: close it rather than leave it waiting, undrawn, for a
       // surface that would show it later unasked.
-      await $.ui.close({ id: SETTINGS }).catch(() => {})
-      return { text: `Token Watch settings: the panel can't be shown here (${opened.reason}).` }
+      await $.ui.close({ id }).catch(() => {})
+      return { text: `${title}: the panel can't be shown here (${opened.reason}).` }
     }
     if (arg !== '' && arg !== 'text') {
-      return { text: 'Usage: /context-bar [text|file|settings]' }
+      return { text: 'Usage: /token-watch [text|file|settings|monitor]' }
     }
     // The band draws on the terminal and the desktop app alone. Elsewhere
     // (the VS Code extension's chat panel, a headless run) a bare
-    // /context-bar answers with the reading as one line instead of toggling
+    // /token-watch answers with the reading as one line instead of toggling
     // a band nobody would see.
     const surfaces = await $.session.surfaces().catch(() => ['terminal'] as const)
     const draws = surfaces.some(s => s === 'terminal' || s === 'desktop')
@@ -436,20 +500,33 @@ export const register: Register = (on, options) => {
   // own, which override the global ones leaf by leaf, or every session's.
   // Then collapsible sections: Usage (a section per window: in which views it
   // shows, and its pace's views, window and unit), Context, and Cache (its
-  // views and keep-warm's caps for this session's TTL). The Buttons are the
-  // marks alone, the labels beside them. A row this session overrides has a
-  // reset in this session's scope, and a note in every session's. A docked
-  // pane, so it stays beside the transcript while the band changes under it.
+  // views and keep-warm's caps for this session's TTL). A checkbox's or a
+  // radio button's Button holds its mark and its label. A row this session
+  // overrides has a reset in this session's scope, and a note in every
+  // session's. A docked pane, so it stays beside the transcript while
+  // the band changes under it.
   on('ui.render', { component: 'Pane', requestId: SETTINGS }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
-    // Marks: ☑ / ☐ for a toggle, ◉ / ○ for a choice and ▸ / ▾ for a section in
-    // the desktop's native button; in a terminal bracketed with no spaces,
-    // [●] / [○] for both kinds (☑ may draw as a wide emoji) and [▸] / [▾].
+    // Every Button is plain on both surfaces (no native frame on the
+    // desktop). A checkbox or a radio button is its mark and its label in one
+    // Button, so a press on either toggles or picks it: ☑ / ☐ and ◉ / ○ on
+    // the desktop, ● / ○ for both in a terminal (☑ may draw there as a wide
+    // emoji). The rest are bracketed with no spaces: [▸] / [▾] for a section,
+    // [-] / [+] for a stepper, [Enable], [reset]. The desktop's font is
+    // proportional: its label columns keep a cell of slack.
     const isTerminal = e.surface === 'terminal'
-    const plain = isTerminal || undefined
-    const wrap = (glyph: string) => (isTerminal ? `[${glyph}]` : glyph)
-    const mark = (isOn: boolean) => (isTerminal ? wrap(isOn ? '\u25cf' : '\u25cb') : isOn ? '\u2611' : '\u2610')
-    const choice = (isOn: boolean) => wrap(isOn ? (isTerminal ? '\u25cf' : '\u25c9') : '\u25cb')
+    const wrap = (glyph: string) => `[${glyph}]`
+    const mark = (isOn: boolean) => (isTerminal ? (isOn ? '\u25cf' : '\u25cb') : isOn ? '\u2611' : '\u2610')
+    const choice = (isOn: boolean) => (isOn ? (isTerminal ? '\u25cf' : '\u25c9') : '\u25cb')
+    const pick = (key: string, glyph: string, label: string, onPress: () => void) => (
+      <Box key={key} flexShrink={0}>
+        <Button key={key} plain onPress={onPress}>
+          {`${glyph} ${label}`}
+        </Button>
+      </Box>
+    )
+    const checkbox = (key: string, label: string, isOn: boolean, onPress: () => void) => pick(key, mark(isOn), label, onPress)
+    const radio = (key: string, label: string, isOn: boolean, onPress: () => void) => pick(key, choice(isOn), label, onPress)
     const isGlobal = await editsGlobal($)
     const hasSession = (await sessionKey($)) !== null
     const own = await read($, override)
@@ -468,22 +545,25 @@ export const register: Register = (on, options) => {
           overridden here
         </Text>
       ) : (
-        <Button key={`reset-${path.join('-')}`} plain={plain} dimColor onPress={() => void resetSetting($, path)}>
+        <Button key={`reset-${path.join('-')}`} plain dimColor onPress={() => void resetSetting($, path)}>
           {wrap('reset')}
         </Button>
       )
     // A section's heading, which opens and closes it, and its body indented.
-    // A sub-section's heading is plain, and carries its row's override
-    // marker, so an override shows with the section closed.
+    // The heading is a plain Button on both surfaces (no native frame on the
+    // desktop), [▾] / [▸] and the title, so a press anywhere on it toggles,
+    // as in TW Monitor. A sub-section's title is not bold, and its
+    // row's override marker follows the Button, so an override shows with
+    // the section closed.
     const section = (id: string, title: string, body: () => unknown, options: { isSub?: true; extra?: unknown } = {}) => {
       const isOpen = open.includes(id)
       return (
         <Box key={id} flexDirection="column">
           <Box flexDirection="row" columnGap={1}>
-            <Button key={`section-${id}`} plain={plain} onPress={() => void toggleSection($, id)}>
-              {wrap(isOpen ? '\u25be' : '\u25b8')}
+            <Button key={`section-${id}`} plain onPress={() => void toggleSection($, id)}>
+              {`[${isOpen ? '\u25be' : '\u25b8'}] `}
+              <Text bold={!options.isSub || undefined}>{title}</Text>
             </Button>
-            <Text bold={!options.isSub || undefined}>{title}</Text>
             {(options.extra ?? null) as never}
           </Box>
           {isOpen && (
@@ -499,14 +579,7 @@ export const register: Register = (on, options) => {
       <Box flexDirection="row" columnGap={1} flexWrap="wrap">
         {VIEWS.map(v => {
           const isOn = getAt(shown, [...path, v]) === true
-          return (
-            <Box key={v} flexDirection="row" columnGap={1} flexShrink={0}>
-              <Button key={`${key}-${v}`} plain={plain} onPress={() => void setSetting($, [...path, v], !isOn)}>
-                {mark(isOn)}
-              </Button>
-              <Text>{VIEW_NAMES[v]}</Text>
-            </Box>
-          )
+          return checkbox(`${key}-${v}`, VIEW_NAMES[v], isOn, () => void setSetting($, [...path, v], !isOn))
         })}
       </Box>
     )
@@ -525,20 +598,20 @@ export const register: Register = (on, options) => {
         id,
         'Alerts',
         () => (
-          <Box flexDirection="row" columnGap={isTerminal ? 0 : 1}>
+          <Box flexDirection="row">
             {level === null ? (
-              <Button key={`alert-${part}-enable`} plain={plain} onPress={() => step(-1)}>
+              <Button key={`alert-${part}-enable`} plain onPress={() => step(-1)}>
                 {wrap('Enable')}
               </Button>
             ) : (
-              <Button key={`alert-${part}-down`} plain={plain} dimColor={level <= 50} onPress={() => step(-1)}>
-                {isTerminal ? '[-]' : '\u2212'}
+              <Button key={`alert-${part}-down`} plain dimColor={level <= 50} onPress={() => step(-1)}>
+                [-]
               </Button>
             )}
             <Text>{level === null ? 'Off' : `${level}%`}</Text>
             {level !== null && (
-              <Button key={`alert-${part}-up`} plain={plain} onPress={() => step(1)}>
-                {isTerminal ? '[+]' : '+'}
+              <Button key={`alert-${part}-up`} plain onPress={() => step(1)}>
+                [+]
               </Button>
             )}
           </Box>
@@ -552,12 +625,12 @@ export const register: Register = (on, options) => {
         <Box width={width} flexShrink={0}>
           <Text>{title}</Text>
         </Box>
-        <Button key={`${key}-down`} plain={plain} dimColor={atMin} onPress={() => by(-1)}>
-          {isTerminal ? '[-]' : '\u2212'}
+        <Button key={`${key}-down`} plain dimColor={atMin} onPress={() => by(-1)}>
+          [-]
         </Button>
         <Text>{value}</Text>
-        <Button key={`${key}-up`} plain={plain} dimColor={atMax} onPress={() => by(1)}>
-          {isTerminal ? '[+]' : '+'}
+        <Button key={`${key}-up`} plain dimColor={atMax} onPress={() => by(1)}>
+          [+]
         </Button>
         {marker(over)}
       </Box>
@@ -590,14 +663,9 @@ export const register: Register = (on, options) => {
                   <Box width={paceWidth} flexShrink={0}>
                     <Text>Unit:</Text>
                   </Box>
-                  {PACE_UNITS[part].map(unit => (
-                    <Box key={unit} flexDirection="row" columnGap={1} flexShrink={0}>
-                      <Button key={`unit-${part}-${unit}`} plain={plain} onPress={() => void setSetting($, ['pace', part, 'unit'], unit)}>
-                        {choice(pace.unit === unit)}
-                      </Button>
-                      <Text>{`%/${unit}`}</Text>
-                    </Box>
-                  ))}
+                  {PACE_UNITS[part].map(unit =>
+                    radio(`unit-${part}-${unit}`, `%/${unit}`, pace.unit === unit, () => void setSetting($, ['pace', part, 'unit'], unit)),
+                  )}
                   {marker(['pace', part, 'unit'])}
                 </Box>
               </Box>
@@ -613,18 +681,8 @@ export const register: Register = (on, options) => {
         {hasSession && (
           <Box flexDirection="column">
             <Box flexDirection="row" columnGap={1} flexWrap="wrap">
-              <Box flexDirection="row" columnGap={1} flexShrink={0}>
-                <Button key="scope-session" plain={plain} onPress={() => void setScope($, 'session')}>
-                  {choice(!isGlobal)}
-                </Button>
-                <Text>This session</Text>
-              </Box>
-              <Box flexDirection="row" columnGap={1} flexShrink={0}>
-                <Button key="scope-global" plain={plain} onPress={() => void setScope($, 'global')}>
-                  {choice(isGlobal)}
-                </Button>
-                <Text>All sessions</Text>
-              </Box>
+              {radio('scope-session', 'This session', !isGlobal, () => void setScope($, 'session'))}
+              {radio('scope-global', 'All sessions', isGlobal, () => void setScope($, 'global'))}
             </Box>
             <Text dimColor wrap="wrap">
               {isGlobal
@@ -638,7 +696,7 @@ export const register: Register = (on, options) => {
               {isGlobal ? (
                 <Button
                   key="reset-defaults"
-                  plain={plain}
+                  plain
                   dimColor={JSON.stringify(shown) === JSON.stringify(DEFAULT_SETTINGS)}
                   onPress={() => void resetDefaults($)}
                 >
@@ -647,7 +705,7 @@ export const register: Register = (on, options) => {
               ) : (
                 <Button
                   key="reset-session"
-                  plain={plain}
+                  plain
                   dimColor={isEmptyOverride(own)}
                   onPress={() => void resetSession($)}
                 >
@@ -676,14 +734,7 @@ export const register: Register = (on, options) => {
                   <Box flexDirection="row" columnGap={1} flexWrap="wrap">
                     {DETAILS.map(([which, name]) => {
                       const isOn = shown.details[which]
-                      return (
-                        <Box key={which} flexDirection="row" columnGap={1} flexShrink={0}>
-                          <Button key={`details-${which}`} plain={plain} onPress={() => void setSetting($, ['details', which], !isOn)}>
-                            {mark(isOn)}
-                          </Button>
-                          <Text>{name}</Text>
-                        </Box>
-                      )
+                      return checkbox(`details-${which}`, name, isOn, () => void setSetting($, ['details', which], !isOn))
                     })}
                   </Box>
                   <Text dimColor wrap="wrap">
@@ -716,14 +767,9 @@ export const register: Register = (on, options) => {
               () => (
                 <Box flexDirection="column">
                   <Box flexDirection="row" columnGap={1} flexWrap="wrap">
-                    {WARM_MODES.map(mode => (
-                      <Box key={mode} flexDirection="row" columnGap={1} flexShrink={0}>
-                        <Button key={`warm-${mode}`} plain={plain} onPress={() => void setSetting($, ['warm', 'mode'], mode)}>
-                          {choice(shown.warm.mode === mode)}
-                        </Button>
-                        <Text>{WARM_MODE_NAMES[mode]}</Text>
-                      </Box>
-                    ))}
+                    {WARM_MODES.map(mode =>
+                      radio(`warm-${mode}`, WARM_MODE_NAMES[mode], shown.warm.mode === mode, () => void setSetting($, ['warm', 'mode'], mode)),
+                    )}
                   </Box>
                   <Text dimColor wrap="wrap">
                     {WARM_MODE_NOTES[shown.warm.mode]}
@@ -772,7 +818,266 @@ export const register: Register = (on, options) => {
           </Box>
         ))}
         <Text dimColor wrap="wrap">
-          A pace is averaged over its window, once that holds 5 minutes of readings. /context-bar settings opens this panel again.
+          A pace is averaged over its window, once that holds 5 minutes of readings. /token-watch settings opens this panel again.
+        </Text>
+      </Box>
+    )
+  })
+
+  // TW Monitor: the usage windows on top, then every live session on
+  // this device (its file written in the last two minutes, and not ended),
+  // this one first with its own figures as they stand, each with its folder,
+  // its context and its prompt cache's countdown. The others' files are read when the panel opens and
+  // every 30 s while it is open.
+  on('ui.render', { component: 'Pane', requestId: SESSIONS }, async ($, e) => {
+    const { Box, Button, Text } = $.ui.resolve(e)
+    const isTerminal = e.surface === 'terminal'
+    const closed = await read($, sessionsClosed)
+    // A section: its heading, which opens and closes it, and its body
+    // indented under it. The heading is a plain Button (no native frame on
+    // the desktop either), [▾] / [▸] and the title, so a press anywhere on it
+    // toggles; what is said about it (this session, working) follows, dim.
+    // Closed, the heading keeps a summary of what it holds: its figures in
+    // their colours, as the band shows them, the rest dim. Its actions (a
+    // session's pin) sit at the row's right edge.
+    const fold = (id: string, title: string, notes: string[], summary: SummaryPart[], body: () => unknown, actions: unknown = null) => {
+      const isOpen = !closed.includes(id)
+      const glyph = isOpen ? '\u25be' : '\u25b8'
+      return (
+        <Box key={id} flexDirection="column">
+          <Box flexDirection="row" columnGap={1}>
+            {/* The glyph bracketed on both surfaces, so it reads as a button at
+                rest too. */}
+            <Box flexShrink={1} minWidth={0}>
+              <Button key={`fold-${id}`} plain onPress={() => void toggleFold($, id)}>
+                {`[${glyph}] `}
+                <Text bold>{title}</Text>
+              </Button>
+            </Box>
+            {/* One line, cut at the edge, and cut before the title is. */}
+            {notes.length > 0 && (
+              <Box flexShrink={NOTES_SHRINK} minWidth={0}>
+                <Text dimColor wrap="truncate">
+                  {notes.join(' · ')}
+                </Text>
+              </Box>
+            )}
+            {!isOpen && (
+              <Box flexShrink={1} minWidth={0}>
+                <Text wrap="truncate">
+                  {summary.map((part, n) => (
+                    <Text key={String(n)} color={part.color} dimColor={part.color === undefined || undefined}>
+                      {part.text}
+                    </Text>
+                  ))}
+                </Text>
+              </Box>
+            )}
+            {/* No fragment: the engine lays a fragment's children out as a
+                column. */}
+            {actions !== null && <Box flexGrow={1} />}
+            {actions as never}
+          </Box>
+          {isOpen && (
+            <Box flexDirection="column" paddingLeft={2}>
+              {body() as never}
+            </Box>
+          )}
+        </Box>
+      )
+    }
+    // The line between the usage and the sessions: a run of box-drawing
+    // lines in a terminal, a hairline on the desktop.
+    const rule = () =>
+      isTerminal ? (
+        <Text key="rule" color={SESSION_TRACK} wrap="truncate">
+          {'\u2500'.repeat(Math.max(1, e.props.bodyColumns - 2))}
+        </Text>
+      ) : (
+        <Box key="rule" flexDirection="row" height={1} alignItems="center">
+          <Box flexGrow={1} height="10%" backgroundColor={SESSION_TRACK} />
+        </Box>
+      )
+    const now = await read($, nowMs)
+    const own = await sessionSnapshotOf($, now, null)
+    // This session first, then the pinned ones, then the rest, each by folder.
+    const pins = await read($, pinned)
+    const isPinned = (s: SessionSnapshot) => s.session.id !== null && s.session.id in pins
+    const others = await read($, sessions)
+    const all = [own, ...others.filter(isPinned), ...others.filter(s => !isPinned(s))]
+    // A session's pin, at its heading's right edge, dim until pinned: the
+    // checkbox's ☐ / ☑ on the desktop, whose font gives [ ] and [*] different
+    // widths; [ ] / [*] in a terminal, where they match.
+    const pin = (s: SessionSnapshot) => {
+      const id = s.session.id
+      if (id === null) return null
+      const isOn = id in pins
+      return (
+        <Box flexShrink={0}>
+          <Button key={`pin-${id}`} plain dimColor={!isOn || undefined} onPress={() => void togglePin($, id)}>
+            {isTerminal ? (isOn ? '[*]' : '[ ]') : isOn ? '☑' : '☐'}
+          </Button>
+        </Box>
+      )
+    }
+    const windows = sorted(current(await read($, limits), now))
+    const pace = await paceOf($, windows, now)
+    // The desktop's font is proportional: two cells of slack, as the band keeps.
+    const labelWidth = SESSION_LABEL_WIDTH + (isTerminal ? 0 : 2)
+    // A folder two sessions share is told apart by the session's id.
+    const folders = all.map(s => folderOf(projectOf(s)))
+    const meter = (fraction: number, color: string) => {
+      const filled = Math.round(Math.min(1, Math.max(0, fraction)) * SESSION_METER)
+      if (isTerminal) {
+        return (
+          <Box flexDirection="row" flexShrink={0}>
+            <Text color={color}>{SESSION_GLYPH.repeat(filled)}</Text>
+            <Text color={SESSION_TRACK}>{SESSION_GLYPH.repeat(SESSION_METER - filled)}</Text>
+          </Box>
+        )
+      }
+      return (
+        <Box flexDirection="row" width={SESSION_METER} height={1} alignItems="center" flexShrink={0}>
+          {filled > 0 && <Box width={filled} height="60%" backgroundColor={color} />}
+          {filled < SESSION_METER && <Box width={SESSION_METER - filled} height="60%" backgroundColor={SESSION_TRACK} />}
+        </Box>
+      )
+    }
+    // A figure's line, in columns that line up from one session to the
+    // next: label, meter, value, note.
+    // A usage window's line adds its burn rate after the note, which then
+    // keeps a column of its own: green while the window resets before it
+    // fills, red once it would fill first.
+    const line = (
+      title: string,
+      fraction: number,
+      fill: string,
+      value: string,
+      color: string | undefined,
+      note: string | null,
+      rate: { text: string; color: string } | null = null,
+    ) => (
+      <Box key={title} flexDirection="row" columnGap={1}>
+        <Box width={labelWidth} flexShrink={0}>
+          <Text dimColor wrap="truncate">
+            {title}
+          </Text>
+        </Box>
+        {meter(fraction, fill)}
+        <Box width={SESSION_VALUE_WIDTH} flexShrink={0}>
+          <Text color={color} dimColor={color === undefined || undefined} wrap="truncate">
+            {value}
+          </Text>
+        </Box>
+        {note !== null && (
+          <Box {...(rate === null ? { flexShrink: 1, minWidth: 0 } : { width: SESSION_NOTE_WIDTH, flexShrink: 0 })}>
+            <Text dimColor wrap="truncate">
+              {note}
+            </Text>
+          </Box>
+        )}
+        {rate !== null && (
+          <Box flexShrink={1} minWidth={0}>
+            <Text color={rate.color} wrap="truncate">
+              {rate.text}
+            </Text>
+          </Box>
+        )}
+      </Box>
+    )
+    const row = (s: SessionSnapshot, i: number) => {
+      const folder = folders[i]!
+      const isShared = folders.filter(f => f === folder).length > 1
+      const ttlMs = TTL_MS[s.cache.ttl]
+      const expires = s.cache.expiresAt === null ? null : Date.parse(s.cache.expiresAt)
+      // A turn running refreshes the cache with each request: the whole TTL.
+      const left = s.isWorking ? ttlMs : expires === null ? null : expires - now
+      const ttlText = left === null ? 'No data' : left <= 0 ? 'Cold' : duration(left)
+      // The countdown red with no data or once cold, else green while
+      // keep-warm runs and grey without (its meter's fill a light grey).
+      const ttlColor = left === null || left <= 0 ? SESSION_COLD : s.cache.keepWarm.on ? SESSION_WARM : undefined
+      // Closed: the context in its level's colour, the countdown in its own.
+      const summary: SummaryPart[] = [
+        ...(s.context === null
+          ? []
+          : [{ text: 'CTX ' }, { text: `${s.context.percent}%`, color: levelColor(s.context.percent) }, { text: ' \u00b7 ' }]),
+        { text: 'TTL ' },
+        { text: ttlText, color: ttlColor },
+      ]
+      const notes = [
+        isShared && s.session.id !== null ? s.session.id.slice(0, 8) : null,
+        s.isWorking ? 'working' : null,
+      ].filter((note): note is string => note !== null)
+      return fold(
+        `session-${s.session.id ?? i}`,
+        // This session, first, is marked by a › before its name.
+        i === 0 ? `${THIS_SESSION} ${folder}` : folder,
+        notes,
+        summary,
+        () => [
+          line(
+            'CTX',
+            s.context === null ? 0 : s.context.percent / 100,
+            s.context === null ? SESSION_TRACK : levelColor(s.context.percent),
+            s.context === null ? 'No data' : `${s.context.percent}%`,
+            s.context === null ? undefined : levelColor(s.context.percent),
+            s.context === null ? null : `${short(s.context.total)} / ${short(s.context.window)}`,
+          ),
+          line(
+            'TTL',
+            left === null ? 0 : left / ttlMs,
+            ttlColor ?? SESSION_IDLE,
+            ttlText,
+            ttlColor,
+            s.cache.keepWarm.on ? `keep-warm: ${WARM_MODE_NAMES[s.cache.keepWarm.mode]}` : null,
+          ),
+        ],
+        pin(s),
+      )
+    }
+    const usageRate = (w: Limit) => {
+      const p = pace.windows[w.kind]
+      return p ? { text: rateText(p.perHour, p.unit), color: p.fullAt === null ? SESSION_WARM : SESSION_COLD } : null
+    }
+    return (
+      <Box flexDirection="column" rowGap={1} paddingX={1}>
+        {/* The usage windows are the account's, the same in every session:
+            once, on top, each with the time until it resets and its burn
+            rate. */}
+        {windows.length > 0 &&
+          fold(
+            'usage',
+            'Usage',
+            [],
+            windows.flatMap((w, n) => [
+              { text: `${n > 0 ? ' \u00b7 ' : ''}${label(w)} ` },
+              { text: `${Math.round(w.percentUsed)}%`, color: levelColor(w.percentUsed) },
+            ]),
+            () =>
+              windows.map(w =>
+                line(
+                  label(w),
+                  w.percentUsed / 100,
+                  levelColor(w.percentUsed),
+                  `${Math.round(w.percentUsed)}%`,
+                  levelColor(w.percentUsed),
+                  countdown(w.resetsAt, now) || null,
+                  usageRate(w),
+                ),
+              ),
+          )}
+        {windows.length > 0 && rule()}
+        {fold('sessions', 'Sessions', [], [{ text: `${all.length}` }], () => (
+          <Box flexDirection="column" rowGap={1}>
+            {all.map(row)}
+          </Box>
+        ))}
+        <Text dimColor wrap="wrap">
+          {sessionsDir === null
+            ? 'Other sessions are not shown: their files are off with the usage snapshot option (/config).'
+            : others.length === 0
+              ? 'No other session is running on this device. The list is read every 30 s.'
+              : 'Sessions on this device, read every 30 s. /token-watch monitor opens this panel again.'}
         </Text>
       </Box>
     )
@@ -842,6 +1147,11 @@ export const register: Register = (on, options) => {
               <Button key="settings" plain onPress={() => void openSettings($)}>
                 {e.surface === 'terminal' ? `[${MENU_TERMINAL}${menuMark}]` : `${MENU}${menuMark}`}
               </Button>
+              {bandView === 'expanded' && (
+                <Button key="sessions" plain onPress={() => void openSessions($)}>
+                  {e.surface === 'terminal' ? `[${SESSIONS_MARK_TERMINAL}]` : SESSIONS_MARK}
+                </Button>
+              )}
             </Box>
           )}
         </Box>
@@ -854,7 +1164,7 @@ export const register: Register = (on, options) => {
 // windows a session's own last response carried, so they are only as new as
 // that response. A reading that follows one (`isFresh`, session.measure)
 // replaces the windows, here and in the store with its time, for every
-// session to pick up (the heartbeat); any other (a start, /context-bar)
+// session to pick up (the heartbeat); any other (a start, /token-watch)
 // fills them only while there are none, and leaves the store alone, so it
 // never puts older figures over newer ones.
 async function takeReading($: EngineInterface, isFresh = false) {
@@ -1016,7 +1326,17 @@ async function rebase($: EngineInterface) {
 // The settings panel, docked beside the transcript where the surface docks
 // panes (opened inline where it does not).
 async function openSettings($: EngineInterface) {
-  return $.ui.open({ id: SETTINGS, title: 'Token Watch', columns: SETTINGS_COLUMNS })
+  return $.ui.open({ id: SETTINGS, title: SETTINGS_TITLE, columns: SETTINGS_COLUMNS })
+}
+
+// TW Monitor, docked like the settings panel; then the other
+// sessions' files read. The open comes first: only an open that answers the
+// person's press or command at once counts as theirs, and a terminal places
+// one that does not only from 144 columns.
+async function openSessions($: EngineInterface) {
+  const opened = $.ui.open({ id: SESSIONS, title: SESSIONS_TITLE, columns: SESSIONS_COLUMNS })
+  await readSessions($)
+  return opened
 }
 
 // Keep-warm's caps in force: the settings panel's, for this session's TTL.
@@ -1109,6 +1429,27 @@ async function editsGlobal($: EngineInterface) {
 
 async function setScope($: EngineInterface, next: Scope) {
   await update($, scope, () => next)
+}
+
+// TW Monitor's section that opens or closes; they start open.
+// A session pinned or unpinned in TW Monitor, for every session's.
+async function togglePin($: EngineInterface, id: string) {
+  const now = await $.clock.now()
+  const kept = readPins(await $.store.get('pinned'))
+  const { [id]: was, ...rest } = kept
+  const next = was === undefined ? { ...kept, [id]: now } : rest
+  await $.store.set('pinned', next)
+  await update($, pinned, () => next)
+}
+
+// The pins as the store keeps them: ids and when each was pinned.
+function readPins(value: unknown): Record<string, number> {
+  if (typeof value !== 'object' || value === null) return {}
+  return Object.fromEntries(Object.entries(value).filter(([, at]) => typeof at === 'number')) as Record<string, number>
+}
+
+async function toggleFold($: EngineInterface, id: string) {
+  await update($, sessionsClosed, closed => (closed.includes(id) ? closed.filter(s => s !== id) : [...closed, id]))
 }
 
 async function toggleSection($: EngineInterface, id: string) {
@@ -1420,19 +1761,172 @@ async function pingFailed($: EngineInterface, why: string, now: number) {
   pingTimer = $.clock.after(RETRY_MS, () => void ping($))
 }
 
-// Where the snapshot goes: ~/.claude/token-watch/usage.json, `~` being
-// USERPROFILE (Windows) or else HOME, the choice Node's os.homedir() makes,
-// so the companion finds it. The path is joined with the home directory's own
-// separator: backslashes if it has any, else slashes. Null when neither
-// variable is set.
-async function resolveSnapshotPath($: EngineInterface) {
+// A path under the home directory, such as the snapshot's,
+// ~/.claude/token-watch/usage.json: `~` is USERPROFILE (Windows) or else
+// HOME, the choice Node's os.homedir() makes, so the companion finds it. The
+// path is joined with the home directory's own separator: backslashes if it
+// has any, else slashes. Null when neither variable is set.
+async function homePath($: EngineInterface, parts: string[]) {
   try {
     const home = (await $.env.get('USERPROFILE')) || (await $.env.get('HOME'))
     if (!home) return null
-    const separator = home.includes('\\') ? '\\' : '/'
-    return [home.replace(/[\\/]+$/, ''), ...SNAPSHOT_PARTS].join(separator)
+    return joinPath(home.replace(/[\\/]+$/, ''), ...parts)
   } catch {
     return null
+  }
+}
+
+// Joined with the first part's own separator, as homePath joins.
+function joinPath(first: string, ...rest: string[]) {
+  return [first, ...rest].join(first.includes('\\') ? '\\' : '/')
+}
+
+// Where a session's name comes from: its project root, which a shell `cd`
+// does not move (the directory it is in does); a file written before the
+// root was kept has only that directory.
+function projectOf(s: SessionSnapshot) {
+  return s.session.root ?? s.session.cwd
+}
+
+// The last folder of a path: the session's folder, as the panel names it.
+function folderOf(cwd: string | null) {
+  return cwd?.split(/[\\/]/).filter(Boolean).pop() ?? 'unknown folder'
+}
+
+// This session as its file says it: its folder, its context and its cache.
+async function sessionSnapshotOf($: EngineInterface, now: number, endedAt: string | null): Promise<SessionSnapshot> {
+  const latest = await read($, reading)
+  const c = await read($, cache)
+  const k = await read($, keepWarm)
+  const iso = (ms: number) => new Date(ms).toISOString()
+  return {
+    schema: 1,
+    writtenAt: iso(now),
+    endedAt,
+    session: {
+      id: await $.session.id().catch(() => null),
+      cwd: await $.session.cwd().catch(() => null),
+      root: await $.session.root().catch(() => null),
+    },
+    isWorking: await read($, working),
+    context:
+      latest === null
+        ? null
+        : { total: latest.total, window: latest.window, percent: Math.round((latest.total / latest.window) * 100) },
+    cache: {
+      ttl: c.ttl,
+      expiresAt: c.warmUntil === null ? null : iso(c.warmUntil),
+      warm: c.warmUntil !== null && now < c.warmUntil,
+      keepWarm: { on: k.on, mode: (await read($, settings)).warm.mode },
+    },
+  }
+}
+
+// A session's file read back, or null for one torn mid-write or of another
+// shape.
+function readSessionSnapshot(text: string): SessionSnapshot | null {
+  try {
+    const s = JSON.parse(text) as SessionSnapshot
+    const isSession =
+      s?.schema === 1 &&
+      typeof s.writtenAt === 'string' &&
+      typeof s.session === 'object' &&
+      s.session !== null &&
+      typeof s.cache === 'object' &&
+      s.cache !== null &&
+      isTtl(s.cache.ttl) &&
+      WARM_MODES.includes(s.cache.keepWarm?.mode)
+    return isSession ? s : null
+  } catch {
+    return null
+  }
+}
+
+// The sessions folder's slots: each one's number, path, last write and
+// file, null where it does not read as one.
+async function listSlots($: EngineInterface) {
+  if (sessionsDir === null) return []
+  const entries = await $.fs.list(sessionsDir).catch(() => [])
+  const slots: { n: number; path: string; mtimeMs: number; file: SessionSnapshot | null }[] = []
+  for (const entry of entries) {
+    const n = entry.kind === 'file' ? SLOT_NAME.exec(entry.name)?.[1] : undefined
+    if (n === undefined) continue
+    const path = joinPath(sessionsDir, entry.name)
+    const text = await $.fs.read(path).catch(() => null)
+    slots.push({ n: Number(n), path, mtimeMs: entry.mtimeMs, file: text === null ? null : readSessionSnapshot(text) })
+  }
+  return slots.sort((a, b) => a.n - b.n)
+}
+
+// This session's slot: the one its id is in (a reload, or the id it wrote
+// last), else the first one free (its session ended, or its file has gone
+// stale), else a new one numbered after the rest.
+async function claimSlot($: EngineInterface, now: number) {
+  if (sessionsDir === null) return null
+  const id = await $.session.id().catch(() => null)
+  const slots = await listSlots($)
+  const own = slots.find(slot => slot.file?.session.id != null && [id, slotId].includes(slot.file.session.id))
+  if (own) return own.path
+  const free = slots.find(
+    slot => now - slot.mtimeMs >= SNAPSHOT_FRESH_MS || (slot.file !== null && slot.file.endedAt !== null),
+  )
+  if (free) return free.path
+  let n = 1
+  while (slots.some(slot => slot.n === n)) n++
+  return joinPath(sessionsDir, `session-${n}.json`)
+}
+
+// Writes this session's file when its figures changed, or when `force` (the
+// heartbeat, which first checks the slot is still this session's: two
+// sessions starting together may pick the same one, and the one written over
+// moves on), or `isEnded` (the session ended).
+async function writeSessionFile($: EngineInterface, force = false, isEnded = false) {
+  if (sessionsDir === null) return
+  try {
+    const now = await $.clock.now()
+    const file = await sessionSnapshotOf($, now, isEnded ? new Date(now).toISOString() : null)
+    const key = JSON.stringify({ ...file, writtenAt: '' })
+    if (!force && slotPath !== null && key === lastSlotKey && now - lastSlotMs < HEARTBEAT_MS) return
+    if (force && slotPath !== null) {
+      const text = await $.fs.read(slotPath).catch(() => null)
+      const there = text === null ? null : readSessionSnapshot(text)
+      if (there !== null && there.session.id !== slotId && there.session.id !== file.session.id) slotPath = null
+    }
+    if (slotPath === null) slotPath = await claimSlot($, now)
+    if (slotPath === null) return
+    await $.fs.write(slotPath, JSON.stringify(file, null, 2) + '\n')
+    slotId = file.session.id
+    lastSlotKey = key
+    lastSlotMs = now
+  } catch {
+    // No file this time; the slot keeps the last one.
+  }
+}
+
+// The other live sessions, read from their files for TW Monitor:
+// written in the last SNAPSHOT_FRESH_MS and not ended, by folder; and the
+// pins.
+async function readSessions($: EngineInterface) {
+  try {
+    const id = await $.session.id().catch(() => null)
+    const now = await $.clock.now()
+    const live = (await listSlots($))
+      .map(slot => slot.file)
+      .filter((s): s is SessionSnapshot => s !== null && s.endedAt === null && s.session.id !== id)
+      .filter(s => now - Date.parse(s.writtenAt) < SNAPSHOT_FRESH_MS)
+      .sort((a, b) => folderOf(projectOf(a)).localeCompare(folderOf(projectOf(b))) || (a.session.id ?? '').localeCompare(b.session.id ?? ''))
+    if (JSON.stringify(live) !== JSON.stringify(await read($, sessions))) await update($, sessions, () => live)
+    // The pins another session set reach this one. A pin is dropped once it
+    // is SESSION_SETTINGS_KEEP_MS old and its session is not running.
+    const saved = readPins(await $.store.get('pinned'))
+    const running = new Set([id, ...live.map(s => s.session.id)])
+    const pins = Object.fromEntries(
+      Object.entries(saved).filter(([pinId, at]) => running.has(pinId) || now - at <= SESSION_SETTINGS_KEEP_MS),
+    )
+    if (Object.keys(pins).length !== Object.keys(saved).length) await $.store.set('pinned', pins)
+    if (JSON.stringify(pins) !== JSON.stringify(await read($, pinned))) await update($, pinned, () => pins)
+  } catch {
+    // Read again at the next tick.
   }
 }
 
@@ -1440,6 +1934,7 @@ async function resolveSnapshotPath($: EngineInterface) {
 // heartbeat). $.fs.write has no atomic form, so a reader may see a torn file
 // for an instant and should read again.
 async function writeSnapshot($: EngineInterface, force = false) {
+  await writeSessionFile($, force)
   if (!snapshotPath) return
   try {
     const now = await $.clock.now()
@@ -1509,7 +2004,8 @@ async function writeSnapshot($: EngineInterface, force = false) {
 // again so its timestamp says this session is alive, unless another session
 // wrote it more recently and its snapshot is still fresh. That session keeps
 // the file while it is active; this one takes over once its snapshot has
-// gone stale.
+// gone stale. This session's own file is written every time, and while the
+// TW Monitor is open the others' files are read again.
 async function heartbeat($: EngineInterface) {
   try {
     // A global setting another session changed reaches this one.
@@ -1528,15 +2024,20 @@ async function heartbeat($: EngineInterface) {
   } catch {
     // Try again at the next tick.
   }
-  if (!snapshotPath) return
-  try {
-    const stat = await $.fs.stat(snapshotPath).catch(() => null)
-    const now = await $.clock.now()
-    if (stat !== null && stat.mtimeMs > lastWriteMs + 1_000 && now - stat.mtimeMs < SNAPSHOT_FRESH_MS) return
-    await writeSnapshot($, true)
-  } catch {
-    // Try again at the next tick.
+  if (snapshotPath) {
+    try {
+      const stat = await $.fs.stat(snapshotPath).catch(() => null)
+      const now = await $.clock.now()
+      const isOthers = stat !== null && stat.mtimeMs > lastWriteMs + 1_000 && now - stat.mtimeMs < SNAPSHOT_FRESH_MS
+      // This session's own file is written either way.
+      if (isOthers) await writeSessionFile($, true)
+      else await writeSnapshot($, true)
+    } catch {
+      // Try again at the next tick.
+    }
   }
+  const panes = await $.ui.panes().catch(() => [])
+  if (panes.some(pane => pane.id === SESSIONS)) await readSessions($)
 }
 
 // Alerts: a notification the first time a part crosses a level it alerts at.
@@ -1598,11 +2099,11 @@ async function adoptUsage($: EngineInterface) {
   if (JSON.stringify(kept) !== JSON.stringify(await read($, history))) await update($, history, () => kept)
 }
 
-// What /context-bar file answers: where the snapshot is and when it was
+// What /token-watch file answers: where the snapshot is and when it was
 // last written, or why there is none.
 async function snapshotStatus($: EngineInterface) {
   if (!snapshotOn) {
-    return 'Token Watch snapshot: off. Turn it on in /config ("Usage snapshot file"), or in /plugin, token-watch, Configure options.'
+    return 'Token Watch snapshot: off. Turn it on in /config ("Usage snapshot files"), or in /plugin, token-watch, Configure options.'
   }
   if (!snapshotPath) {
     return 'Token Watch snapshot: on, but neither USERPROFILE nor HOME is set, so there is nowhere to write it.'
