@@ -2456,11 +2456,22 @@ describe('TW Monitor', () => {
       for (const [id, words] of headings) {
         expect(first).toContain(`"key":"fold-${id}","label":"${heading(open, words)}"`)
       }
-      // The session's name alone is in its Button; its pin is at the row's
-      // right edge, after a spacer that takes the room between.
+      // The session's name alone is in its Button. Its pin comes first, in a
+      // column of its own where the indent under Sessions was; its hide is at
+      // the row's right edge, after a spacer that takes the room between.
       expect(first).toContain(`"label":"${heading(open, '› proj')}","plain":true}`)
       expect(first).toContain(
-        `{"type":"Box","props":{"flexGrow":1}},{"type":"Box","props":{"flexShrink":0},"children":[{"type":"Button","props":{"key":"pin-sess-1","label":"${surface === 'terminal' ? '[ ]' : '⚐'}"`,
+        // A minimum, not a fixed width: a fixed two clipped the desktop's flag.
+        `{"type":"Box","props":{"minWidth":${surface === 'terminal' ? 3 : 2},"flexShrink":0},"children":[{"type":"Button","props":{"key":"pin-sess-1","label":"${surface === 'terminal' ? '[ ]' : '⚐'}"`,
+      )
+      expect(first.indexOf('"key":"pin-sess-1"')).toBeLessThan(first.indexOf('"key":"fold-session-sess-1"'))
+      // Against the heading on the desktop, whose flag Button brings its own
+      // room; a cell between in a terminal.
+      expect(first).toContain(
+        `{"type":"Box","props":{"flexDirection":"row","columnGap":${surface === 'terminal' ? 1 : 0},"flexShrink":1,"minWidth":0},"children":[{"type":"Box","props":{"minWidth"`,
+      )
+      expect(first).toContain(
+        `{"type":"Box","props":{"flexGrow":1}},{"type":"Box","props":{"flexShrink":0},"children":[{"type":"Button","props":{"key":"hide-sess-1","label":"${surface === 'terminal' ? '[×]' : '×'}"`,
       )
       // The rule: a line of 50 cells in a terminal (the body less its
       // margins), a hairline on the desktop.
@@ -2573,6 +2584,86 @@ describe('TW Monitor', () => {
     }
     await clock.advance(30_000)
     expect(JSON.stringify(await pane.drawn())).toContain('"key":"pin-zz","label":"[*]"')
+  })
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    test(`${surface}: × dismisses a session to Hidden and ↺ restores it; Hidden is always there, closed at first`, async ($, on) => {
+      const { saved } = await start($, on, surface, RATE_LIMITS, undefined, undefined, {
+        sessionFiles: {
+          'session-1.json': otherSession('aa', 'C:/work/alpha', 10_000),
+          'session-2.json': otherSession('zz', 'C:/work/zulu', 10_000),
+        },
+      })
+      await run($, 'monitor')
+      const pane = await $.ui.mount<Surface, 'Pane'>({ ...SESSIONS_PANE, surface })
+      const drawn = async () => JSON.stringify(await pane.drawn())
+      const [dismiss, restore] = surface === 'terminal' ? ['[×]', '[↺]'] : ['×', '↺']
+      const first = await drawn()
+      // Every session has one, this one too; Hidden is there, closed, empty.
+      for (const id of ['sess-1', 'aa', 'zz']) {
+        expect(first).toContain(`"key":"hide-${id}","label":"${dismiss}","plain":true,"dimColor":true`)
+      }
+      expect(first).toContain('"key":"fold-hidden","label":"[▸] Hidden"')
+      await pane.press({ key: 'fold-hidden' })
+      expect(await drawn()).toContain('No hidden sessions.')
+      await pane.press({ key: 'fold-hidden' })
+      await pane.press({ key: 'hide-zz' })
+      expect(saved.get('hiddenSessions')).toEqual({ zz: NOW })
+      // Out of Sessions (one fewer there), into Hidden, still closed.
+      const hidden = await drawn()
+      expect(hidden).toContain('"key":"fold-hidden","label":"[▸] Hidden"')
+      expect(hidden).not.toContain('zulu')
+      await pane.press({ key: 'fold-sessions' })
+      const counts = await drawn()
+      expect(counts).toContain(pieces(tint('2')))
+      expect(counts).toContain(pieces(tint('1')))
+      await pane.press({ key: 'fold-sessions' })
+      await pane.press({ key: 'fold-hidden' })
+      const opened = await drawn()
+      expect(opened.indexOf('"label":"[▾] Hidden"')).toBeLessThan(opened.indexOf('"label":"[▾] zulu"'))
+      expect(opened).toContain(`"key":"hide-zz","label":"${restore}","plain":true,"dimColor":true`)
+      // Restored: back in Sessions, by folder; Hidden stays, empty again.
+      await pane.press({ key: 'hide-zz' })
+      expect(saved.get('hiddenSessions')).toEqual({})
+      const back = await drawn()
+      expect(back).toContain('"key":"fold-hidden","label":"[▾] Hidden"')
+      expect(back).toContain('No hidden sessions.')
+      expect(back.indexOf('"label":"[▾] alpha"')).toBeLessThan(back.indexOf('"label":"[▾] zulu"'))
+      expect(back.indexOf('"label":"[▾] zulu"')).toBeLessThan(back.indexOf('"label":"[▾] Hidden"'))
+    })
+
+    test(`${surface}: hiding this session keeps it here, first, and marks it hidden for the others' panels`, async ($, on) => {
+      const { saved } = await start($, on, surface, RATE_LIMITS)
+      await run($, 'monitor')
+      const pane = await $.ui.mount<Surface, 'Pane'>({ ...SESSIONS_PANE, surface })
+      await pane.press({ key: 'hide-sess-1' })
+      expect(saved.get('hiddenSessions')).toEqual({ 'sess-1': NOW })
+      const d = JSON.stringify(await pane.drawn())
+      expect(d.indexOf('"label":"[▾] › proj"')).toBeLessThan(d.indexOf('"label":"[▸] Hidden"'))
+      expect(d).toContain(`"key":"hide-sess-1","label":"${surface === 'terminal' ? '[↺]' : '↺'}"`)
+    })
+  }
+
+  test("another session's hidden ones reach this one; a pinned hidden session keeps its pin there", async ($, on) => {
+    const old = NOW - 31 * 24 * 60 * MINUTE
+    const { saved } = await start($, on, 'terminal', RATE_LIMITS, undefined, {
+      hiddenSessions: { zz: NOW, gone: old },
+      pinned: { zz: NOW },
+    }, {
+      sessionFiles: {
+        'session-1.json': otherSession('aa', 'C:/work/alpha', 10_000),
+        'session-2.json': otherSession('zz', 'C:/work/zulu', 10_000),
+      },
+    })
+    await run($, 'monitor')
+    expect(saved.get('hiddenSessions')).toEqual({ zz: NOW })
+    const pane = await $.ui.mount<Surface, 'Pane'>({ ...SESSIONS_PANE, surface: 'terminal' })
+    await pane.press({ key: 'fold-hidden' })
+    const d = JSON.stringify(await pane.drawn())
+    // Pinned, but hidden: in Hidden, not above alpha in Sessions.
+    expect(d.indexOf('"label":"[▾] alpha"')).toBeLessThan(d.indexOf('"label":"[▾] Hidden"'))
+    expect(d.indexOf('"label":"[▾] Hidden"')).toBeLessThan(d.indexOf('"label":"[▾] zulu"'))
+    expect(d).toContain('"key":"pin-zz","label":"[*]"')
   })
 
   test("a session is named by its project root, not the directory a shell cd took it to", async ($, on) => {

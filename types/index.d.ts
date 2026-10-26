@@ -308,9 +308,11 @@ declare module 'claude-code' {
       // read their files, and the panel's sections closed (all open at first).
       sessions: SessionSnapshot[]
       sessionsClosed: string[]
-      // The sessions pinned in TW Monitor, by id, with when each was pinned:
-      // shared through the store, so every session's TW Monitor has them.
+      // The sessions pinned in TW Monitor, and those moved to its Hidden
+      // section, by id, with when each was: shared through the store, so
+      // every session's TW Monitor has them.
       pinned: Record<string, number>
+      hiddenSessions: Record<string, number>
     }
   }
 }

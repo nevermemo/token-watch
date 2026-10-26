@@ -169,6 +169,7 @@ const history = atom({ plugin: 'token-watch', key: 'history' } as const, {})
 const sessions = atom({ plugin: 'token-watch', key: 'sessions' } as const, [])
 const sessionsClosed = atom({ plugin: 'token-watch', key: 'sessionsClosed' } as const, [])
 const pinned = atom({ plugin: 'token-watch', key: 'pinned' } as const, {})
+const hiddenSessions = atom({ plugin: 'token-watch', key: 'hiddenSessions' } as const, {})
 
 // The context's details lines, as the panel names them.
 const DETAILS: ['mcp' | 'memory' | 'skills', string][] = [
@@ -210,6 +211,20 @@ const NOTES_SHRINK = 100
 // TW Monitor's mark for this session, before its name: one cell everywhere,
 // where ▶ may draw as an emoji.
 const THIS_SESSION = '›'
+
+// TW Monitor's marks on sessions and their store keys: pinned, and hidden
+// (`hidden` is 1.3.0's parts, still read by the settings' migration).
+const MARKS = { pinned: 'pinned', hidden: 'hiddenSessions' } as const
+type Mark = keyof typeof MARKS
+
+// TW Monitor's sections that start closed.
+const CLOSED_FIRST = new Set(['hidden'])
+
+// The pin's column before a session's heading, at least: [ ] in a terminal;
+// two cells on the desktop, a minimum the flag's Button widens as it needs
+// (a fixed two clipped it).
+const PIN_WIDTH_TERMINAL = 3
+const PIN_WIDTH_DESKTOP = 2
 
 // A piece of a closed section's summary: in its colour, or dim without one.
 type SummaryPart = { text: string; color?: string }
@@ -838,21 +853,36 @@ export const register: Register = (on, options) => {
     // the desktop either), [▾] / [▸] and the title, so a press anywhere on it
     // toggles; what is said about it (this session, working) follows, dim.
     // Closed, the heading keeps a summary of what it holds: its figures in
-    // their colours, as the band shows them, the rest dim. Its actions (a
-    // session's pin) sit at the row's right edge.
-    const fold = (id: string, title: string, notes: string[], summary: SummaryPart[], body: () => unknown, actions: unknown = null) => {
-      const isOpen = !closed.includes(id)
+    // their colours, as the band shows them, the rest dim. Options: `lead`
+    // before the heading (a session's pin), `actions` at the row's right edge
+    // (its hide), and the body's `indent`.
+    const fold = (
+      id: string,
+      title: string,
+      notes: string[],
+      summary: SummaryPart[],
+      body: () => unknown,
+      options: { lead?: unknown; actions?: unknown; indent?: number } = {},
+    ) => {
+      const { lead = null, actions = null, indent = 2 } = options
+      // A section is open until toggled, Hidden closed until toggled.
+      const isOpen = closed.includes(id) === CLOSED_FIRST.has(id)
       const glyph = isOpen ? '\u25be' : '\u25b8'
       return (
         <Box key={id} flexDirection="column">
           <Box flexDirection="row" columnGap={1}>
-            {/* The glyph bracketed on both surfaces, so it reads as a button at
-                rest too. */}
-            <Box flexShrink={1} minWidth={0}>
-              <Button key={`fold-${id}`} plain onPress={() => void toggleFold($, id)}>
-                {`[${glyph}] `}
-                <Text bold>{title}</Text>
-              </Button>
+            {/* The lead against the heading on the desktop, where the flag's
+                Button brings its own room; a cell between in a terminal. */}
+            <Box flexDirection="row" columnGap={isTerminal ? 1 : 0} flexShrink={1} minWidth={0}>
+              {lead as never}
+              {/* The glyph bracketed on both surfaces, so it reads as a button
+                  at rest too. */}
+              <Box flexShrink={1} minWidth={0}>
+                <Button key={`fold-${id}`} plain onPress={() => void toggleFold($, id)}>
+                  {`[${glyph}] `}
+                  <Text bold>{title}</Text>
+                </Button>
+              </Box>
             </Box>
             {/* One line, cut at the edge, and cut before the title is. */}
             {notes.length > 0 && (
@@ -879,7 +909,7 @@ export const register: Register = (on, options) => {
             {actions as never}
           </Box>
           {isOpen && (
-            <Box flexDirection="column" paddingLeft={2}>
+            <Box flexDirection="column" paddingLeft={indent}>
               {body() as never}
             </Box>
           )}
@@ -900,22 +930,50 @@ export const register: Register = (on, options) => {
       )
     const now = await read($, nowMs)
     const own = await sessionSnapshotOf($, now, null)
-    // This session first, then the pinned ones, then the rest, each by folder.
+    // This session first, then the pinned ones, then the rest, each by
+    // folder; the hidden ones in their own section, pinned first too. This
+    // session is never hidden in its own panel: hiding it hides it from the
+    // other sessions' panels.
     const pins = await read($, pinned)
+    const hides = await read($, hiddenSessions)
     const isPinned = (s: SessionSnapshot) => s.session.id !== null && s.session.id in pins
+    const isHidden = (s: SessionSnapshot) => s.session.id !== null && s.session.id in hides
+    const byPin = (list: SessionSnapshot[]) => [...list.filter(isPinned), ...list.filter(s => !isPinned(s))]
     const others = await read($, sessions)
-    const all = [own, ...others.filter(isPinned), ...others.filter(s => !isPinned(s))]
-    // A session's pin, at its heading's right edge, dim until pinned: a flag,
-    // ⚐ / ⚑, on the desktop, one shape outlined and filled, whose font gives
-    // [ ] and [*] different widths; [ ] / [*] in a terminal, where they match.
+    const all = [own, ...byPin(others.filter(s => !isHidden(s)))]
+    const tucked = byPin(others.filter(isHidden))
+    const everyone = [...all, ...tucked]
+    // A session's pin, before its heading where the indent under Sessions
+    // was, dim until pinned: a flag, ⚐ / ⚑, on the desktop, one shape
+    // outlined and filled, whose font gives [ ] and [*] different widths;
+    // [ ] / [*] in a terminal, where they match. Its column keeps its width
+    // with no id to pin by, so the headings line up; a minimum, so a font
+    // that draws the flag wider widens it rather than clipping it.
+    const pinWidth = isTerminal ? PIN_WIDTH_TERMINAL : PIN_WIDTH_DESKTOP
     const pin = (s: SessionSnapshot) => {
       const id = s.session.id
+      const isOn = id !== null && id in pins
+      return (
+        <Box minWidth={pinWidth} flexShrink={0}>
+          {id !== null && (
+            <Button key={`pin-${id}`} plain dimColor={!isOn || undefined} onPress={() => void toggleMark($, 'pinned', id)}>
+              {isTerminal ? (isOn ? '[*]' : '[ ]') : isOn ? '⚑' : '⚐'}
+            </Button>
+          )}
+        </Box>
+      )
+    }
+    // Its hide, at the row's right edge, dim: × dismisses it to Hidden, ↺
+    // restores it to Sessions; bracketed in a terminal, as the pin is. This
+    // session has one too: it hides it from the other sessions' panels.
+    const hide = (s: SessionSnapshot) => {
+      const id = s.session.id
       if (id === null) return null
-      const isOn = id in pins
+      const glyph = id in hides ? '↺' : '×'
       return (
         <Box flexShrink={0}>
-          <Button key={`pin-${id}`} plain dimColor={!isOn || undefined} onPress={() => void togglePin($, id)}>
-            {isTerminal ? (isOn ? '[*]' : '[ ]') : isOn ? '⚑' : '⚐'}
+          <Button key={`hide-${id}`} plain dimColor onPress={() => void toggleMark($, 'hidden', id)}>
+            {isTerminal ? `[${glyph}]` : glyph}
           </Button>
         </Box>
       )
@@ -925,7 +983,7 @@ export const register: Register = (on, options) => {
     // The desktop's font is proportional: two cells of slack, as the band keeps.
     const labelWidth = SESSION_LABEL_WIDTH + (isTerminal ? 0 : 2)
     // A folder two sessions share is told apart by the session's id.
-    const folders = all.map(s => folderOf(projectOf(s)))
+    const folders = everyone.map(s => folderOf(projectOf(s)))
     const meter = (fraction: number, color: string) => {
       const filled = Math.round(Math.min(1, Math.max(0, fraction)) * SESSION_METER)
       if (isTerminal) {
@@ -1032,7 +1090,8 @@ export const register: Register = (on, options) => {
             s.cache.keepWarm.on ? `keep-warm: ${WARM_MODE_NAMES[s.cache.keepWarm.mode]}` : null,
           ),
         ],
-        pin(s),
+        // Its lines indented under its heading, past the pin's column.
+        { lead: pin(s), actions: hide(s), indent: pinWidth + (isTerminal ? 1 : 0) + 2 },
       )
     }
     const usageRate = (w: Limit) => {
@@ -1067,11 +1126,40 @@ export const register: Register = (on, options) => {
               ),
           )}
         {windows.length > 0 && rule()}
-        {fold('sessions', 'Sessions', [], [{ text: `${all.length}` }], () => (
-          <Box flexDirection="column" rowGap={1}>
-            {all.map(row)}
-          </Box>
-        ))}
+        {/* Not indented: each session's pin takes the indent's place. */}
+        {fold(
+          'sessions',
+          'Sessions',
+          [],
+          [{ text: `${all.length}` }],
+          () => (
+            <Box flexDirection="column" rowGap={1}>
+              {all.map(row)}
+            </Box>
+          ),
+          { indent: 0 },
+        )}
+        {/* The sessions dismissed out of the way, under Sessions: closed at
+            first, and there with none in it too. */}
+        {fold(
+          'hidden',
+          'Hidden',
+          [],
+          [{ text: `${tucked.length}` }],
+          () =>
+            tucked.length === 0 ? (
+              <Box paddingLeft={2}>
+                <Text dimColor wrap="wrap">
+                  No hidden sessions. × on a session moves it here.
+                </Text>
+              </Box>
+            ) : (
+              <Box flexDirection="column" rowGap={1}>
+                {tucked.map((s, n) => row(s, all.length + n))}
+              </Box>
+            ),
+          { indent: 0 },
+        )}
         <Text dimColor wrap="wrap">
           {sessionsDir === null
             ? 'Other sessions are not shown: their files are off with the usage snapshot option (/config).'
@@ -1431,23 +1519,35 @@ async function setScope($: EngineInterface, next: Scope) {
   await update($, scope, () => next)
 }
 
-// TW Monitor's section that opens or closes; they start open.
-// A session pinned or unpinned in TW Monitor, for every session's.
-async function togglePin($: EngineInterface, id: string) {
+// A session pinned or unpinned, hidden or shown again, in TW Monitor, for
+// every session's.
+async function toggleMark($: EngineInterface, mark: Mark, id: string) {
   const now = await $.clock.now()
-  const kept = readPins(await $.store.get('pinned'))
+  const kept = readMarks(await $.store.get(MARKS[mark]))
   const { [id]: was, ...rest } = kept
   const next = was === undefined ? { ...kept, [id]: now } : rest
-  await $.store.set('pinned', next)
-  await update($, pinned, () => next)
+  await $.store.set(MARKS[mark], next)
+  await setMarks($, mark, next)
 }
 
-// The pins as the store keeps them: ids and when each was pinned.
-function readPins(value: unknown): Record<string, number> {
+// A mark's ids put in place. Each atom by name: the engine's scan reads an
+// update's atom only where it is written out.
+async function setMarks($: EngineInterface, mark: Mark, next: Record<string, number>) {
+  if (mark === 'pinned') {
+    if (JSON.stringify(next) !== JSON.stringify(await read($, pinned))) await update($, pinned, () => next)
+  } else if (JSON.stringify(next) !== JSON.stringify(await read($, hiddenSessions))) {
+    await update($, hiddenSessions, () => next)
+  }
+}
+
+// A mark as the store keeps it: ids and when each was set.
+function readMarks(value: unknown): Record<string, number> {
   if (typeof value !== 'object' || value === null) return {}
   return Object.fromEntries(Object.entries(value).filter(([, at]) => typeof at === 'number')) as Record<string, number>
 }
 
+// TW Monitor's section that opens or closes: open at first, save the ones in
+// CLOSED_FIRST, for which the list holds the ones opened.
 async function toggleFold($: EngineInterface, id: string) {
   await update($, sessionsClosed, closed => (closed.includes(id) ? closed.filter(s => s !== id) : [...closed, id]))
 }
@@ -1905,7 +2005,7 @@ async function writeSessionFile($: EngineInterface, force = false, isEnded = fal
 
 // The other live sessions, read from their files for TW Monitor:
 // written in the last SNAPSHOT_FRESH_MS and not ended, by folder; and the
-// pins.
+// pins and hidden sessions.
 async function readSessions($: EngineInterface) {
   try {
     const id = await $.session.id().catch(() => null)
@@ -1916,15 +2016,17 @@ async function readSessions($: EngineInterface) {
       .filter(s => now - Date.parse(s.writtenAt) < SNAPSHOT_FRESH_MS)
       .sort((a, b) => folderOf(projectOf(a)).localeCompare(folderOf(projectOf(b))) || (a.session.id ?? '').localeCompare(b.session.id ?? ''))
     if (JSON.stringify(live) !== JSON.stringify(await read($, sessions))) await update($, sessions, () => live)
-    // The pins another session set reach this one. A pin is dropped once it
-    // is SESSION_SETTINGS_KEEP_MS old and its session is not running.
-    const saved = readPins(await $.store.get('pinned'))
+    // The marks another session set reach this one. A mark is dropped once
+    // it is SESSION_SETTINGS_KEEP_MS old and its session is not running.
     const running = new Set([id, ...live.map(s => s.session.id)])
-    const pins = Object.fromEntries(
-      Object.entries(saved).filter(([pinId, at]) => running.has(pinId) || now - at <= SESSION_SETTINGS_KEEP_MS),
-    )
-    if (Object.keys(pins).length !== Object.keys(saved).length) await $.store.set('pinned', pins)
-    if (JSON.stringify(pins) !== JSON.stringify(await read($, pinned))) await update($, pinned, () => pins)
+    for (const mark of ['pinned', 'hidden'] as const) {
+      const saved = readMarks(await $.store.get(MARKS[mark]))
+      const kept = Object.fromEntries(
+        Object.entries(saved).filter(([markId, at]) => running.has(markId) || now - at <= SESSION_SETTINGS_KEEP_MS),
+      )
+      if (Object.keys(kept).length !== Object.keys(saved).length) await $.store.set(MARKS[mark], kept)
+      await setMarks($, mark, kept)
+    }
   } catch {
     // Read again at the next tick.
   }
